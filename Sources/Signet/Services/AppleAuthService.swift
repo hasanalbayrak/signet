@@ -424,14 +424,16 @@ public final class AppleAuthService: @unchecked Sendable {
         sessionConfig.httpShouldSetCookies = true
         let urlSession = URLSession(configuration: sessionConfig)
 
+        var cookieList: [HTTPCookie] = []
         if let data = session.cookiesData,
            let unarchived = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, HTTPCookie.self], from: data) as? [HTTPCookie] {
+            cookieList = unarchived
             for c in unarchived {
                 sessionConfig.httpCookieStorage?.setCookie(c)
             }
         }
 
-        // Set active team on Olympus
+        // Set active team on Olympus if available
         let switchURL = olympusBase.appendingPathComponent("session")
         var switchReq = URLRequest(url: switchURL)
         switchReq.httpMethod = "POST"
@@ -445,7 +447,13 @@ public final class AppleAuthService: @unchecked Sendable {
         if let device = targetDevice, !device.udid.isEmpty {
             onStep?(.registeringDevice(deviceName: device.displayName))
             onLog?(LogMessage(level: .info, message: "Registering '\(device.displayName)' with Apple Developer Portal..."))
-            registeredDeviceId = try? await registerDevice(urlSession: urlSession, device: device, onLog: onLog)
+            registeredDeviceId = try? await registerDevice(
+                urlSession: urlSession,
+                device: device,
+                team: team,
+                cookies: cookieList,
+                onLog: onLog
+            )
         }
 
         // 2. Certificate Generation
@@ -455,6 +463,7 @@ public final class AppleAuthService: @unchecked Sendable {
         let certResult = try await generateAndRequestCertificate(
             urlSession: urlSession,
             team: team,
+            cookies: cookieList,
             onLog: onLog
         )
 
@@ -464,8 +473,10 @@ public final class AppleAuthService: @unchecked Sendable {
 
         let profileData = try await createAndDownloadProfile(
             urlSession: urlSession,
+            team: team,
             certId: certResult.certId,
             deviceId: registeredDeviceId,
+            cookies: cookieList,
             onLog: onLog
         )
 
@@ -489,33 +500,79 @@ public final class AppleAuthService: @unchecked Sendable {
         return (certInfo, profileInfo)
     }
 
-    private func registerDevice(urlSession: URLSession, device: Device, onLog: (@Sendable (LogMessage) -> Void)?) async throws -> String? {
-        let url = developerServicesBase.appendingPathComponent("devices")
+    // MARK: - Portal Network Helper
+
+    private func makePortalRequest(
+        url: URL,
+        method: String = "POST",
+        bodyParams: [String: String]? = nil,
+        cookies: [HTTPCookie]
+    ) -> URLRequest {
         var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpMethod = method
+        req.setValue("application/json, text/javascript, */*; q=0.01", forHTTPHeaderField: "Accept")
+        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        req.setValue("https://developer.apple.com/account/", forHTTPHeaderField: "Referer")
+        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
 
-        let body: [String: Any] = [
-            "data": [
-                "type": "devices",
-                "attributes": [
-                    "name": device.displayName,
-                    "udid": device.udid,
-                    "platform": "IOS"
-                ]
-            ]
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        if !cookieHeader.isEmpty {
+            req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
+
+        if let params = bodyParams {
+            req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            let bodyString = params.map { key, value in
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
+                return "\(key)=\(encodedValue)"
+            }.joined(separator: "&")
+            req.httpBody = bodyString.data(using: .utf8)
+        }
+
+        return req
+    }
+
+    private func registerDevice(
+        urlSession: URLSession,
+        device: Device,
+        team: DeveloperTeam,
+        cookies: [HTTPCookie],
+        onLog: (@Sendable (LogMessage) -> Void)?
+    ) async throws -> String? {
+        let addURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/addDevices.action")!
+        let params: [String: String] = [
+            "teamId": team.id,
+            "deviceClasses": "iphone",
+            "deviceNumbers": device.udid,
+            "deviceNames": device.displayName,
+            "register": "single"
         ]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
 
-        let (data, response) = try await urlSession.data(for: req)
-        if let http = response as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201) {
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let dataObj = json["data"] as? [String: Any],
-               let id = dataObj["id"] as? String {
-                onLog?(LogMessage(level: .success, message: "Device registered: \(device.displayName)"))
+        if let (data, response) = try? await urlSession.data(for: req),
+           let http = response as? HTTPURLResponse, http.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let devices = json["devices"] as? [[String: Any]], let first = devices.first,
+               let id = (first["deviceId"] as? String) ?? (first["id"] as? String) {
+                onLog?(LogMessage(level: .success, message: "Device registered in team '\(team.name)': \(device.displayName)"))
                 return id
             }
         }
+
+        // Check if device is already registered in team
+        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
+        let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        if let (listData, listResp) = try? await urlSession.data(for: listReq),
+           let listHttp = listResp as? HTTPURLResponse, listHttp.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
+           let devices = json["devices"] as? [[String: Any]] {
+            if let match = devices.first(where: { ($0["deviceNumber"] as? String) == device.udid }),
+               let id = (match["deviceId"] as? String) ?? (match["id"] as? String) {
+                onLog?(LogMessage(level: .info, message: "Device already registered in team '\(team.name)' (ID: \(id))."))
+                return id
+            }
+        }
+
         return nil
     }
 
@@ -528,6 +585,7 @@ public final class AppleAuthService: @unchecked Sendable {
     private func generateAndRequestCertificate(
         urlSession: URLSession,
         team: DeveloperTeam,
+        cookies: [HTTPCookie],
         onLog: (@Sendable (LogMessage) -> Void)?
     ) async throws -> CertPackage {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -541,7 +599,7 @@ public final class AppleAuthService: @unchecked Sendable {
         let p12Path = tempDir.appendingPathComponent("output.p12").path
         let password = "SignetPass\(Int.random(in: 100000...999999))"
 
-        onLog?(LogMessage(level: .verbose, message: "Creating RSA 2048 private key and CSR..."))
+        onLog?(LogMessage(level: .verbose, message: "Generating RSA 2048 private key and CSR for \(team.name)..."))
 
         let csrGen = Process()
         csrGen.launchPath = "/usr/bin/openssl"
@@ -554,65 +612,116 @@ public final class AppleAuthService: @unchecked Sendable {
             throw AppleDeveloperError.opensslExecutionFailed("Could not generate CSR with /usr/bin/openssl")
         }
 
-        // Post CSR to certificates endpoint
-        let url = developerServicesBase.appendingPathComponent("certificates")
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        onLog?(LogMessage(level: .info, message: "Requesting Development Certificate from Apple Developer Portal..."))
 
-        let body: [String: Any] = [
-            "data": [
-                "type": "certificates",
-                "attributes": [
-                    "certificateType": "DEVELOPMENT",
-                    "csrContent": csrContent
-                ]
-            ]
-        ]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await urlSession.data(for: req)
-        var certId = UUID().uuidString
+        // Certificate types: "83Q87W3TGH" (Apple Development), fallback "5QPB9NHCEI" (iOS Development)
+        let certTypes = ["83Q87W3TGH", "5QPB9NHCEI"]
+        var certId = ""
         var rawCerData: Data? = nil
+        var lastErrorMessage = ""
 
-        if let http = response as? HTTPURLResponse, http.statusCode < 300 {
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let dataObj = json["data"] as? [String: Any],
-               let id = dataObj["id"] as? String,
-               let attr = dataObj["attributes"] as? [String: Any],
-               let b64 = attr["certificateContent"] as? String {
-                certId = id
-                rawCerData = Data(base64Encoded: b64)
+        for certType in certTypes {
+            let submitURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/submitCertificateRequest.action")!
+            let params = [
+                "teamId": team.id,
+                "type": certType,
+                "csrContent": csrContent
+            ]
+            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies)
+
+            if let (data, response) = try? await urlSession.data(for: req),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+
+                if let certReq = json["certRequest"] as? [String: Any] {
+                    let id = (certReq["certificateId"] as? String) ??
+                             ((certReq["certificate"] as? [String: Any])?["certificateId"] as? String) ?? ""
+                    if !id.isEmpty {
+                        certId = id
+                    }
+                    if let contentStr = (certReq["certContent"] as? String) ??
+                                        ((certReq["certificate"] as? [String: Any])?["certContent"] as? String) {
+                        rawCerData = contentStr.data(using: .utf8) ?? Data(base64Encoded: contentStr)
+                    }
+                }
+
+                // If certificateId exists but certContent wasn't in response, download directly
+                if !certId.isEmpty && rawCerData == nil {
+                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certId)&type=\(certType)")!
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                    if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
+                       let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
+                        rawCerData = dlData
+                    }
+                }
+
+                if rawCerData != nil {
+                    onLog?(LogMessage(level: .success, message: "Development certificate successfully issued: ID \(certId)"))
+                    break
+                }
+
+                if let userStr = json["userString"] as? String {
+                    lastErrorMessage = userStr
+                }
             }
         }
 
-        // If certificate limit reached or creation didn't return content, fetch existing
+        // If creation failed or limit reached, search for existing active certificates in the team
         if rawCerData == nil {
-            onLog?(LogMessage(level: .info, message: "Fetching active development certificate from team..."))
-            let listURL = developerServicesBase.appendingPathComponent("certificates?filter[certificateType]=DEVELOPMENT")
-            var listReq = URLRequest(url: listURL)
-            listReq.httpMethod = "GET"
-            let (listData, listResp) = try await urlSession.data(for: listReq)
-            if let listHttp = listResp as? HTTPURLResponse, listHttp.statusCode < 400,
+            onLog?(LogMessage(level: .info, message: "Checking for existing certificates in team '\(team.name)'..."))
+            let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
+            let listParams = [
+                "teamId": team.id,
+                "types": "83Q87W3TGH,5QPB9NHCEI",
+                "pageNumber": "1",
+                "pageSize": "500",
+                "sort": "certRequestStatusCode=asc"
+            ]
+            let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: listParams, cookies: cookies)
+
+            if let (listData, listResp) = try? await urlSession.data(for: listReq),
+               let listHttp = listResp as? HTTPURLResponse, listHttp.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
-               let dataArr = json["data"] as? [[String: Any]], let first = dataArr.first,
-               let id = first["id"] as? String,
-               let attr = first["attributes"] as? [String: Any],
-               let b64 = attr["certificateContent"] as? String {
-                certId = id
-                rawCerData = Data(base64Encoded: b64)
+               let certs = json["certRequests"] as? [[String: Any]] {
+
+                let activeCerts = certs.filter {
+                    ($0["statusString"] as? String) == "Issued" ||
+                    ($0["canDownload"] as? Bool) == true
+                }
+
+                if let existing = activeCerts.first,
+                   let existingId = existing["certificateId"] as? String {
+                    let existingType = (existing["certificateTypeDisplayId"] as? String) ?? "83Q87W3TGH"
+                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(existingId)&type=\(existingType)")!
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+
+                    if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
+                       let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
+                        certId = existingId
+                        rawCerData = dlData
+                        onLog?(LogMessage(level: .info, message: "Retrieved existing certificate from Apple (ID: \(existingId))."))
+                    }
+                }
             }
         }
 
-        guard let cerBytes = rawCerData else {
-            throw AppleDeveloperError.certificateCreationFailed("Could not obtain certificate content from Apple.")
+        guard let cerBytes = rawCerData, !cerBytes.isEmpty else {
+            let detail = lastErrorMessage.isEmpty ? "Could not obtain certificate content from Apple." : lastErrorMessage
+            throw AppleDeveloperError.certificateCreationFailed(detail)
         }
 
         try cerBytes.write(to: URL(fileURLWithPath: certDerPath))
 
-        // Convert DER to PEM and package P12
+        // Convert DER to PEM
         _ = runOpenssl(["x509", "-inform", "der", "-in", certDerPath, "-out", certPemPath])
-        _ = runOpenssl(["pkcs12", "-export", "-out", p12Path, "-inkey", keyPath, "-in", certPemPath, "-password", "pass:\(password)"])
+        if !FileManager.default.fileExists(atPath: certPemPath) || (try? FileManager.default.attributesOfItem(atPath: certPemPath)[.size] as? Int) == 0 {
+            try? cerBytes.write(to: URL(fileURLWithPath: certPemPath))
+        }
+
+        let p12Success = runOpenssl(["pkcs12", "-export", "-out", p12Path, "-inkey", keyPath, "-in", certPemPath, "-password", "pass:\(password)"])
+        guard p12Success, FileManager.default.fileExists(atPath: p12Path) else {
+            throw AppleDeveloperError.certificateCreationFailed("Failed to package certificate and private key into PKCS#12 (.p12). If your team's certificate limit was reached, revoke an unused certificate on developer.apple.com so Signet can generate a fresh matching keypair.")
+        }
 
         let p12Data = try Data(contentsOf: URL(fileURLWithPath: p12Path))
         return CertPackage(certId: certId, p12Data: p12Data, password: password)
@@ -620,111 +729,141 @@ public final class AppleAuthService: @unchecked Sendable {
 
     private func createAndDownloadProfile(
         urlSession: URLSession,
+        team: DeveloperTeam,
         certId: String,
         deviceId: String?,
+        cookies: [HTTPCookie],
         onLog: (@Sendable (LogMessage) -> Void)?
     ) async throws -> Data {
-        let profileName = "Signet Wildcard (\(Int.random(in: 100...999)))"
+        onLog?(LogMessage(level: .info, message: "Checking for existing Wildcard profiles via Xcode API..."))
 
-        // Ensure bundle ID
-        let bundleURL = developerServicesBase.appendingPathComponent("bundleIds?limit=20")
-        var bundleReq = URLRequest(url: bundleURL)
-        bundleReq.httpMethod = "GET"
-        let (bundleData, _) = try await urlSession.data(for: bundleReq)
+        // 1. Try Xcode API for instant profile retrieval (contains base64 encodedProfile)
+        let xcodeURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action")!
+        let xcodeParams = [
+            "teamId": team.id,
+            "includeInactiveProfiles": "true",
+            "includeExpiredProfiles": "false",
+            "onlyCountLists": "true"
+        ]
+        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies)
 
-        var bundleIdId = ""
-        if let json = try? JSONSerialization.jsonObject(with: bundleData) as? [String: Any],
-           let arr = json["data"] as? [[String: Any]], let first = arr.first,
-           let id = first["id"] as? String {
-            bundleIdId = id
-        }
+        if let (xcData, xcResp) = try? await urlSession.data(for: xcodeReq),
+           let xcHttp = xcResp as? HTTPURLResponse, xcHttp.statusCode == 200,
+           let plist = try? PropertyListSerialization.propertyList(from: xcData, options: [], format: nil) as? [String: Any],
+           let profiles = plist["provisioningProfiles"] as? [[String: Any]] {
 
-        if bundleIdId.isEmpty {
-            // Create wildcard bundle ID
-            let createBundleURL = developerServicesBase.appendingPathComponent("bundleIds")
-            var cReq = URLRequest(url: createBundleURL)
-            cReq.httpMethod = "POST"
-            cReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let cBody: [String: Any] = [
-                "data": [
-                    "type": "bundleIds",
-                    "attributes": [
-                        "identifier": "com.signet.wildcard.\(Int.random(in: 1000...9999)).*",
-                        "name": "Signet Wildcard",
-                        "platform": "IOS"
-                    ]
-                ]
-            ]
-            cReq.httpBody = try? JSONSerialization.data(withJSONObject: cBody)
-            if let (cData, cResp) = try? await urlSession.data(for: cReq),
-               let cHttp = cResp as? HTTPURLResponse, cHttp.statusCode < 300,
-               let cJson = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
-               let cDataObj = cJson["data"] as? [String: Any],
-               let id = cDataObj["id"] as? String {
-                bundleIdId = id
+            for prof in profiles {
+                if let encodedData = prof["encodedProfile"] as? Data {
+                    onLog?(LogMessage(level: .success, message: "Retrieved Wildcard Provisioning Profile via Xcode API!"))
+                    return encodedData
+                } else if let b64Str = prof["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64Str) {
+                    onLog?(LogMessage(level: .success, message: "Retrieved Wildcard Provisioning Profile via Xcode API!"))
+                    return decoded
+                }
             }
         }
 
-        // Create profile
-        let profURL = developerServicesBase.appendingPathComponent("profiles")
-        var profReq = URLRequest(url: profURL)
-        profReq.httpMethod = "POST"
-        profReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // 2. Find or create App ID (Bundle ID)
+        onLog?(LogMessage(level: .info, message: "Ensuring Wildcard App ID exists on Apple Developer Portal..."))
+        let listAppIdsURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/listAppIds.action")!
+        let listAppReq = makePortalRequest(url: listAppIdsURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
 
-        var devArray: [[String: String]] = []
-        if let dId = deviceId {
-            devArray.append(["type": "devices", "id": dId])
+        var appIdId = ""
+        if let (appData, appResp) = try? await urlSession.data(for: listAppReq),
+           let appHttp = appResp as? HTTPURLResponse, appHttp.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: appData) as? [String: Any],
+           let appIds = json["appIds"] as? [[String: Any]] {
+            if let wildcard = appIds.first(where: {
+                ($0["isWildcard"] as? Bool) == true ||
+                (($0["identifier"] as? String)?.hasSuffix("*") == true)
+            }) {
+                appIdId = (wildcard["appIdId"] as? String) ?? (wildcard["id"] as? String) ?? ""
+            } else if let firstApp = appIds.first {
+                appIdId = (firstApp["appIdId"] as? String) ?? (firstApp["id"] as? String) ?? ""
+            }
         }
 
-        let body: [String: Any] = [
-            "data": [
-                "type": "profiles",
-                "attributes": [
-                    "name": profileName,
-                    "profileType": "IOS_APP_DEVELOPMENT"
-                ],
-                "relationships": [
-                    "bundleId": [
-                        "data": ["type": "bundleIds", "id": bundleIdId]
-                    ],
-                    "certificates": [
-                        "data": [["type": "certificates", "id": certId]]
-                    ],
-                    "devices": [
-                        "data": devArray
-                    ]
-                ]
+        // If no wildcard App ID exists, create one
+        if appIdId.isEmpty {
+            onLog?(LogMessage(level: .info, message: "Registering new Wildcard App ID (*)..."))
+            let addAppURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/addAppId.action")!
+            let addAppParams = [
+                "teamId": team.id,
+                "name": "Signet Wildcard",
+                "type": "wildcard",
+                "identifier": "*"
             ]
+            let addAppReq = makePortalRequest(url: addAppURL, method: "POST", bodyParams: addAppParams, cookies: cookies)
+            if let (addData, addResp) = try? await urlSession.data(for: addAppReq),
+               let addHttp = addResp as? HTTPURLResponse, addHttp.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: addData) as? [String: Any],
+               let appObj = json["appId"] as? [String: Any] {
+                appIdId = (appObj["appIdId"] as? String) ?? (appObj["id"] as? String) ?? ""
+            }
+        }
+
+        // 3. Create or download Provisioning Profile via Developer Portal
+        let profName = "Signet Wildcard \(Int.random(in: 100...999))"
+        let createProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/createProvisioningProfile.action")!
+        var createParams: [String: String] = [
+            "teamId": team.id,
+            "provisioningProfileName": profName,
+            "distributionType": "limited",
+            "certificateIds": certId
         ]
-        profReq.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        let (profDataResp, profResponse) = try await urlSession.data(for: profReq)
-        if let http = profResponse as? HTTPURLResponse, http.statusCode < 300,
-           let json = try? JSONSerialization.jsonObject(with: profDataResp) as? [String: Any],
-           let dataObj = json["data"] as? [String: Any],
-           let attr = dataObj["attributes"] as? [String: Any],
-           let b64 = attr["profileContent"] as? String,
-           let decoded = Data(base64Encoded: b64) {
-            onLog?(LogMessage(level: .success, message: "Profile created: \(profileName)"))
-            return decoded
+        if !appIdId.isEmpty {
+            createParams["appIdId"] = appIdId
+        }
+        if let dId = deviceId {
+            createParams["deviceIds"] = dId
         }
 
-        // Fallback: fetch existing profiles
-        let getProfURL = developerServicesBase.appendingPathComponent("profiles?filter[profileType]=IOS_APP_DEVELOPMENT")
-        var getReq = URLRequest(url: getProfURL)
-        getReq.httpMethod = "GET"
-        let (getData, getResp) = try await urlSession.data(for: getReq)
-        if let http = getResp as? HTTPURLResponse, http.statusCode < 400,
-           let json = try? JSONSerialization.jsonObject(with: getData) as? [String: Any],
-           let arr = json["data"] as? [[String: Any]], let first = arr.first,
-           let attr = first["attributes"] as? [String: Any],
-           let b64 = attr["profileContent"] as? String,
-           let decoded = Data(base64Encoded: b64) {
-            onLog?(LogMessage(level: .info, message: "Loaded existing Wildcard Profile from Apple."))
-            return decoded
+        let createProfReq = makePortalRequest(url: createProfURL, method: "POST", bodyParams: createParams, cookies: cookies)
+
+        var profileId = ""
+        if let (cData, cResp) = try? await urlSession.data(for: createProfReq),
+           let cHttp = cResp as? HTTPURLResponse, cHttp.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
+           let profObj = json["provisioningProfile"] as? [String: Any] {
+            profileId = (profObj["provisioningProfileId"] as? String) ?? (profObj["id"] as? String) ?? ""
+            if let b64 = profObj["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
+                onLog?(LogMessage(level: .success, message: "Profile created: \(profName)"))
+                return decoded
+            }
         }
 
-        throw AppleDeveloperError.profileCreationFailed("Failed to generate or download Provisioning Profile.")
+        // 4. Download profile content if created
+        if !profileId.isEmpty {
+            let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(profileId)")!
+            let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+            if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
+               let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
+                onLog?(LogMessage(level: .success, message: "Downloaded profile: \(profName)"))
+                return dlData
+            }
+        }
+
+        // 5. Fallback: check existing profiles on portal
+        let listProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/listProvisioningProfiles.action")!
+        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        if let (lData, lResp) = try? await urlSession.data(for: listProfReq),
+           let lHttp = lResp as? HTTPURLResponse, lHttp.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
+           let profiles = json["provisioningProfiles"] as? [[String: Any]] {
+            for prof in profiles {
+                if let pId = prof["provisioningProfileId"] as? String {
+                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                    if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
+                       let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
+                        onLog?(LogMessage(level: .info, message: "Downloaded active team profile."))
+                        return dlData
+                    }
+                }
+            }
+        }
+
+        throw AppleDeveloperError.profileCreationFailed("Failed to generate or download Provisioning Profile from Apple Developer Portal.")
     }
 
     private func runOpenssl(_ args: [String]) -> Bool {

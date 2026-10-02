@@ -85,16 +85,27 @@ public final class AppleAuthService: @unchecked Sendable {
             return .success(session: devSession, teams: teams)
         }
 
-        // Parse error message
-        var errorMessage = "Invalid Apple ID or password."
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let serviceErrors = json["service_errors"] as? [[String: Any]],
-               let first = serviceErrors.first,
-               let msg = first["message"] as? String {
-                errorMessage = msg
-            }
+        // Parse JSON error if present from Apple's identity API
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let serviceErrors = json["service_errors"] as? [[String: Any]],
+           let first = serviceErrors.first,
+           let msg = first["message"] as? String {
+            return .failed(message: msg)
         }
-        return .failed(message: errorMessage)
+
+        if httpResponse.statusCode == 401 {
+            return .failed(message: "Invalid Apple ID or password. Please verify your credentials.")
+        }
+
+        if httpResponse.statusCode == 503 || httpResponse.statusCode == 403 {
+            return .failed(message: "Apple requires interactive authentication for this account (Akamai Security Challenge). Please use the 'Sign In with Apple (Secure Web Login)' button.")
+        }
+
+        if let html = String(data: data, encoding: .utf8), html.contains("<html") {
+            return .failed(message: "Apple server returned an interactive challenge (HTTP \(httpResponse.statusCode)). Please use 'Sign In with Apple (Secure Web Login)'.")
+        }
+
+        return .failed(message: "Apple ID authentication failed (HTTP \(httpResponse.statusCode)). Please use 'Sign In with Apple (Secure Web Login)'.")
     }
 
     // MARK: - Verify 2FA (Step 2)
@@ -153,6 +164,24 @@ public final class AppleAuthService: @unchecked Sendable {
         return (devSession, teams)
     }
 
+    // MARK: - WebKit Cookie Session Handling
+
+    public func handleWebCookies(cookies: [HTTPCookie]) async throws -> (session: AppleDeveloperSession, teams: [DeveloperTeam]) {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.httpCookieAcceptPolicy = .always
+        sessionConfig.httpShouldSetCookies = true
+        let session = URLSession(configuration: sessionConfig)
+
+        for cookie in cookies {
+            sessionConfig.httpCookieStorage?.setCookie(cookie)
+        }
+
+        let devSession = try await fetchOlympusSession(session: session, cookies: cookies, appleId: "Apple Developer Account")
+        let teams = try await fetchTeams(session: session, cookies: cookies)
+
+        return (devSession, teams)
+    }
+
     // MARK: - Olympus Session & Teams Lookup
 
     public func fetchOlympusSession(
@@ -181,16 +210,22 @@ public final class AppleAuthService: @unchecked Sendable {
         }
 
         var fullName = appleId
+        var userEmail = appleId
         var defaultTeamId: String? = nil
         var defaultTeamName: String? = nil
 
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let user = json["user"] as? [String: Any] {
+                if let email = user["emailAddress"] as? String, !email.isEmpty {
+                    userEmail = email
+                }
                 let first = user["firstName"] as? String ?? ""
                 let last = user["lastName"] as? String ?? ""
                 let combined = "\(first) \(last)".trimmingCharacters(in: .whitespaces)
                 if !combined.isEmpty {
                     fullName = combined
+                } else if !userEmail.isEmpty && userEmail != "Apple Developer Account" {
+                    fullName = userEmail
                 }
             }
 
@@ -203,7 +238,7 @@ public final class AppleAuthService: @unchecked Sendable {
         let cookiesData = try? NSKeyedArchiver.archivedData(withRootObject: cookies, requiringSecureCoding: false)
 
         return AppleDeveloperSession(
-            appleId: appleId,
+            appleId: userEmail,
             userFullName: fullName,
             selectedTeamId: defaultTeamId,
             selectedTeamName: defaultTeamName,

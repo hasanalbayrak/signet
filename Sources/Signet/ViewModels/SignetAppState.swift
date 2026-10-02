@@ -51,6 +51,8 @@ public final class SignetAppState: ObservableObject {
     @Published public var twoFactorContext: Apple2FAContext? = nil
     @Published public var currentDeveloperSession: AppleDeveloperSession? = nil
     @Published public var isAppleIDSigningIn: Bool = false
+    @Published public var showAppleWebLoginSheet: Bool = false
+    @Published public var settingsInlineErrorMessage: String? = nil
 
     // MARK: - Dependencies
     private let credentialService = CredentialService.shared
@@ -278,10 +280,11 @@ public final class SignetAppState: ObservableObject {
     public func signInWithAppleID() {
         guard !appleIDEmail.trimmingCharacters(in: .whitespaces).isEmpty,
               !appleIDPassword.isEmpty else {
-            showError("Please enter your Apple ID email and password.")
+            showSettingsError("Please enter your Apple ID email and password.")
             return
         }
 
+        settingsInlineErrorMessage = nil
         isAppleIDSigningIn = true
         appendLog(LogMessage(level: .info, message: "Authenticating '\(appleIDEmail)' with Apple ID servers..."))
 
@@ -300,6 +303,7 @@ public final class SignetAppState: ObservableObject {
                     self.availableTeams = teams
                     self.selectedTeam = teams.first
                     self.isAwaiting2FA = false
+                    self.settingsInlineErrorMessage = nil
                     self.saveAppleDeveloperSession(session)
                     self.appendLog(LogMessage(level: .success, message: "Logged in as \(session.userFullName) (\(teams.count) teams found)."))
 
@@ -307,16 +311,41 @@ public final class SignetAppState: ObservableObject {
                     self.twoFactorContext = context
                     self.isAwaiting2FA = true
                     self.twoFactorCode = ""
+                    self.settingsInlineErrorMessage = nil
                     self.appendLog(LogMessage(level: .warning, message: "Two-Factor Authentication required. Check your Apple devices for the 6-digit code."))
 
                 case .failed(let message):
-                    self.showError(message)
+                    self.showSettingsError(message)
                     self.appendLog(LogMessage(level: .error, message: "Sign in failed: \(message)"))
                 }
             } catch {
                 self.isAppleIDSigningIn = false
-                self.showError(error.localizedDescription)
+                self.showSettingsError(error.localizedDescription)
                 self.appendLog(LogMessage(level: .error, message: "Apple ID Error: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    public func handleWebLoginSuccess(cookies: [HTTPCookie]) {
+        settingsInlineErrorMessage = nil
+        isAppleIDSigningIn = true
+        appendLog(LogMessage(level: .info, message: "Processing Apple WebKit login session..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let (session, teams) = try await self.appleAuthService.handleWebCookies(cookies: cookies)
+                self.isAppleIDSigningIn = false
+                self.currentDeveloperSession = session
+                self.availableTeams = teams
+                self.selectedTeam = teams.first
+                self.settingsInlineErrorMessage = nil
+                self.saveAppleDeveloperSession(session)
+                self.appendLog(LogMessage(level: .success, message: "Logged in via Apple WebKit as \(session.userFullName) (\(teams.count) teams found)."))
+            } catch {
+                self.isAppleIDSigningIn = false
+                self.showSettingsError("Failed to extract Apple Developer session: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "Apple Session Error: \(error.localizedDescription)"))
             }
         }
     }
@@ -325,10 +354,11 @@ public final class SignetAppState: ObservableObject {
         guard let context = twoFactorContext else { return }
         let code = twoFactorCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard code.count >= 6 else {
-            showError("Please enter the complete 6-digit verification code.")
+            showSettingsError("Please enter the complete 6-digit verification code.")
             return
         }
 
+        settingsInlineErrorMessage = nil
         isAppleIDSigningIn = true
         appendLog(LogMessage(level: .info, message: "Submitting 2FA verification code to Apple..."))
 
@@ -347,11 +377,12 @@ public final class SignetAppState: ObservableObject {
                 self.currentDeveloperSession = session
                 self.availableTeams = teams
                 self.selectedTeam = teams.first
+                self.settingsInlineErrorMessage = nil
                 self.saveAppleDeveloperSession(session)
                 self.appendLog(LogMessage(level: .success, message: "2FA Verified! Welcome, \(session.userFullName)."))
             } catch {
                 self.isAppleIDSigningIn = false
-                self.showError(error.localizedDescription)
+                self.showSettingsError(error.localizedDescription)
                 self.appendLog(LogMessage(level: .error, message: "2FA Verification failed: \(error.localizedDescription)"))
             }
         }
@@ -636,5 +667,14 @@ public final class SignetAppState: ObservableObject {
     public func showError(_ message: String) {
         self.alertErrorMessage = message
         self.showErrorAlert = true
+        self.settingsInlineErrorMessage = message
+    }
+
+    public func showSettingsError(_ message: String) {
+        self.settingsInlineErrorMessage = message
+    }
+
+    public func clearSettingsError() {
+        self.settingsInlineErrorMessage = nil
     }
 }

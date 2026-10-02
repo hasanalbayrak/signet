@@ -65,6 +65,47 @@ public struct SettingsView: View {
 
             Divider()
 
+            // Inline Error Banner
+            if let errorMsg = appState.settingsInlineErrorMessage {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.red)
+                        .font(.system(size: 15))
+                        .padding(.top, 2)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Notice")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.red)
+
+                        Text(errorMsg)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        appState.clearSettingsError()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Color.secondary)
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(12)
+                .background(Color.red.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.red.opacity(0.3), lineWidth: 1)
+                )
+                .padding(.horizontal, 20)
+                .padding(.top, 10)
+            }
+
             ScrollView {
                 VStack(spacing: 18) {
                     switch selectedTab {
@@ -81,7 +122,13 @@ public struct SettingsView: View {
                 .padding(20)
             }
         }
-        .frame(width: 640, height: 640)
+        .frame(width: 640, height: 680)
+        .sheet(isPresented: $appState.showAppleWebLoginSheet) {
+            AppleIDWebLoginView(appState: appState)
+        }
+        .onChange(of: selectedTab) {
+            appState.clearSettingsError()
+        }
         .onAppear {
             self.inputPassword = appState.p12Password
             self.statusReport = appState.binaryManager.getStatusReport()
@@ -308,61 +355,125 @@ public struct SettingsView: View {
 
     @ViewBuilder
     private func appleIDLoginFormView() -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
-                    Text("Apple ID:")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 80, alignment: .trailing)
+        VStack(spacing: 16) {
+            // Method 1: Web Login (Recommended)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(width: 40, height: 40)
+                        Image(systemName: "apple.logo")
+                            .font(.system(size: 22))
+                    }
 
-                    TextField("name@example.com", text: $appState.appleIDEmail)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
-                }
-
-                GridRow {
-                    Text("Password:")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 80, alignment: .trailing)
-
-                    SecureField("Apple ID Password", text: $appState.appleIDPassword)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
-                        .onSubmit {
-                            appState.signInWithAppleID()
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("Sign In with Apple")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("RECOMMENDED")
+                                .font(.system(size: 9, weight: .heavy))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.2))
+                                .foregroundStyle(Color.green)
+                                .clipShape(Capsule())
                         }
+                        Text("Official Apple Developer authentication modal. Seamlessly bypasses Akamai bot/WAF filters and supports Touch ID, Passkey, iCloud Keychain, and 2FA.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
-
-            HStack {
-                Spacer()
 
                 Button {
-                    appState.signInWithAppleID()
+                    appState.showAppleWebLoginSheet = true
                 } label: {
-                    HStack(spacing: 6) {
-                        if appState.isAppleIDSigningIn {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.right.circle.fill")
-                        }
-                        Text("Sign In with Apple ID")
+                    HStack(spacing: 8) {
+                        Image(systemName: "safari.fill")
+                        Text("Sign In with Apple (Secure Web Login)")
                     }
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(appState.appleIDEmail.isEmpty || appState.appleIDPassword.isEmpty || appState.isAppleIDSigningIn)
+                .controlSize(.regular)
             }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+            )
 
-            Text("🔒 Direct communication with official Apple Identity servers (`idmsa.apple.com`). Your credentials and session are protected locally inside macOS Keychain.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            // Divider with OR
+            HStack {
+                Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
+                Text("OR DIRECT CREDENTIALS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
+            }
+            .padding(.horizontal, 8)
+
+            // Method 2: Direct Credentials
+            VStack(alignment: .leading, spacing: 12) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                    GridRow {
+                        Text("Apple ID:")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+
+                        TextField("name@example.com", text: $appState.appleIDEmail)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                    }
+
+                    GridRow {
+                        Text("Password:")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+
+                        SecureField("Apple ID Password", text: $appState.appleIDPassword)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                            .onSubmit {
+                                appState.signInWithAppleID()
+                            }
+                    }
+                }
+
+                HStack {
+                    Text("Direct automated sign-in may trigger Akamai security challenges.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        appState.signInWithAppleID()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if appState.isAppleIDSigningIn {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.right.circle.fill")
+                            }
+                            Text("Sign In")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(appState.appleIDEmail.isEmpty || appState.appleIDPassword.isEmpty || appState.isAppleIDSigningIn)
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
         }
-        .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     // MARK: - App Store Connect API Key Section

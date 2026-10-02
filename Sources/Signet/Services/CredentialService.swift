@@ -128,13 +128,103 @@ public final class CredentialService: @unchecked Sendable {
         return info
     }
 
+    private var opensslBinaryURL: URL {
+        for path in ["/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl"] {
+            if fileManager.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return URL(fileURLWithPath: "/usr/bin/openssl")
+    }
+
+    private func tryOpenSSLReencode(data: Data, password: String) -> Data? {
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDir) }
+
+        let inP12 = tempDir.appendingPathComponent("input.p12")
+        let pemPath = tempDir.appendingPathComponent("temp.pem")
+        let outP12 = tempDir.appendingPathComponent("converted.p12")
+
+        let binURL = opensslBinaryURL
+        let isOpenSSL3 = binURL.path.contains("homebrew") || binURL.path.contains("local")
+
+        do {
+            try data.write(to: inP12)
+
+            // Step 1: Verify password and extract key & cert to PEM using OpenSSL
+            let process1 = Process()
+            process1.executableURL = binURL
+            process1.arguments = ["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path]
+            let pipe1 = Pipe()
+            process1.standardError = pipe1
+            process1.standardOutput = pipe1
+            try process1.run()
+            process1.waitUntilExit()
+
+            guard process1.terminationStatus == 0, fileManager.fileExists(atPath: pemPath.path) else {
+                return nil
+            }
+
+            // Step 2: Re-export into Apple Security framework compatible standard 3DES PKCS#12
+            // If OpenSSL 3, use -legacy to force 3DES_CBC which Apple's SecPKCS12Import and zsign require
+            var exportArgs = ["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"]
+            if isOpenSSL3 {
+                exportArgs.append("-legacy")
+            }
+
+            let process2 = Process()
+            process2.executableURL = binURL
+            process2.arguments = exportArgs
+            let pipe2 = Pipe()
+            process2.standardError = pipe2
+            process2.standardOutput = pipe2
+            try process2.run()
+            process2.waitUntilExit()
+
+            if process2.terminationStatus != 0 && isOpenSSL3 {
+                // Fallback without -legacy if failed
+                let processFallback = Process()
+                processFallback.executableURL = binURL
+                processFallback.arguments = ["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"]
+                try? processFallback.run()
+                processFallback.waitUntilExit()
+            }
+
+            guard fileManager.fileExists(atPath: outP12.path), let convertedData = try? Data(contentsOf: outP12), !convertedData.isEmpty else {
+                return nil
+            }
+
+            return convertedData
+        } catch {
+            return nil
+        }
+    }
+
     public func parseP12(data: Data, password: String, path: String? = nil) throws -> CertificateInfo {
+        var activeData = data
         let options: [String: Any] = [
             kSecImportExportPassphrase as String: password
         ]
 
         var rawItems: CFArray?
-        let status = SecPKCS12Import(data as CFData, options as CFDictionary, &rawItems)
+        var status = SecPKCS12Import(activeData as CFData, options as CFDictionary, &rawItems)
+
+        // If native SecPKCS12Import fails (often caused by modern PBKDF2/AES-256 ciphers), try OpenSSL compatibility re-encoding
+        if status != errSecSuccess {
+            if let converted = tryOpenSSLReencode(data: data, password: password) {
+                var convertedItems: CFArray?
+                let convertedStatus = SecPKCS12Import(converted as CFData, options as CFDictionary, &convertedItems)
+                if convertedStatus == errSecSuccess, let cItems = convertedItems as? [[String: Any]], !cItems.isEmpty {
+                    activeData = converted
+                    rawItems = convertedItems
+                    status = convertedStatus
+                    if let filePath = path, fileManager.fileExists(atPath: filePath) {
+                        try? converted.write(to: URL(fileURLWithPath: filePath))
+                    }
+                }
+            }
+        }
 
         guard status == errSecSuccess, let items = rawItems as? [[String: Any]], let firstItem = items.first else {
             throw CredentialError.invalidPasswordOrCorruptP12

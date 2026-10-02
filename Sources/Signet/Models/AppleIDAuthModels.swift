@@ -28,7 +28,7 @@ public struct AppleDeveloperSession: Codable, Hashable, Sendable {
     public var selectedTeamId: String?
     public var selectedTeamName: String?
     public let sessionToken: String?
-    public let cookiesData: Data?
+    public var cookiesData: Data?
 
     public init(
         appleId: String,

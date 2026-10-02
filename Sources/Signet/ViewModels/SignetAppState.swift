@@ -36,6 +36,8 @@ public final class SignetAppState: ObservableObject {
     @Published public var showSettingsSheet: Bool = false
     @Published public var showErrorAlert: Bool = false
     @Published public var alertErrorMessage: String = ""
+    @Published public var showPasswordPrompt: Bool = false
+    @Published public var passwordPromptMessage: String = ""
 
     // Apple Developer Auto-Provisioning (API Key & Apple ID)
     @Published public var ascCredentials = AppStoreConnectCredentials(keyId: "", issuerId: "", privateKeyPem: "")
@@ -166,15 +168,53 @@ public final class SignetAppState: ObservableObject {
 
     // MARK: - Credential Operations
 
-    public func importP12(from url: URL, password: String) {
+    public func importP12(from url: URL, password: String) throws {
+        let cert = try credentialService.importAndSaveP12(from: url, password: password)
+        self.certificate = cert
+        self.p12Password = password
+        self.showPasswordPrompt = false
+        appendLog(LogMessage(level: .success, message: "Certificate successfully imported: \(cert.commonName)"))
+    }
+
+    public func promptForCertificatePassword(message: String? = nil) {
+        self.passwordPromptMessage = message ?? "Please enter the password for your .p12 certificate:"
+        self.showPasswordPrompt = true
+    }
+
+    public func updateP12Password(_ newPassword: String) {
+        self.p12Password = newPassword
         do {
-            let cert = try credentialService.importAndSaveP12(from: url, password: password)
-            self.certificate = cert
-            self.p12Password = password
-            appendLog(LogMessage(level: .success, message: "Certificate successfully imported: \(cert.commonName)"))
+            try credentialService.savePasswordToKeychain(newPassword)
+            appendLog(LogMessage(level: .success, message: "Certificate password updated in Keychain."))
         } catch {
-            showError(error.localizedDescription)
+            appendLog(LogMessage(level: .warning, message: "Could not save password to Keychain: \(error.localizedDescription)"))
         }
+
+        // Re-validate against saved .p12 if present
+        let p12Path = credentialService.savedP12URL
+        if FileManager.default.fileExists(atPath: p12Path.path) {
+            do {
+                let cert = try credentialService.importAndSaveP12(from: p12Path, password: newPassword)
+                self.certificate = cert
+                self.showPasswordPrompt = false
+                appendLog(LogMessage(level: .success, message: "Certificate validated successfully with new password: \(cert.commonName)"))
+            } catch {
+                appendLog(LogMessage(level: .error, message: "Password validation failed: \(error.localizedDescription)"))
+                self.showError("The entered password could not unlock the certificate. Please verify your password.")
+            }
+        } else {
+            self.showPasswordPrompt = false
+        }
+    }
+
+    public func removeActiveCertificate() {
+        credentialService.deletePasswordFromKeychain()
+        try? FileManager.default.removeItem(at: credentialService.savedP12URL)
+        UserDefaults.standard.removeObject(forKey: "saved_p12_path")
+        self.certificate = nil
+        self.p12Password = ""
+        self.showPasswordPrompt = false
+        appendLog(LogMessage(level: .info, message: "Active certificate removed."))
     }
 
     public func importProfile(from url: URL) {
@@ -194,6 +234,7 @@ public final class SignetAppState: ObservableObject {
         certificate = nil
         profile = nil
         p12Password = ""
+        showPasswordPrompt = false
         appendLog(LogMessage(level: .info, message: "Cleared saved credentials and certificates."))
     }
 
@@ -497,21 +538,14 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                var cookies: [HTTPCookie] = []
-                if let data = session.cookiesData {
-                    cookies = AppleAuthService.decodeCookies(from: data)
-                }
-
-
-                let sessionConfig = URLSessionConfiguration.ephemeral
-                sessionConfig.httpCookieAcceptPolicy = .always
-                sessionConfig.httpShouldSetCookies = true
-                let urlSession = URLSession(configuration: sessionConfig)
-                for c in cookies {
-                    sessionConfig.httpCookieStorage?.setCookie(c)
-                }
-
-                let teams = try await self.appleAuthService.fetchTeams(session: urlSession, cookies: cookies)
+                let (urlSession, cookies) = self.appleAuthService.makeSession(from: session)
+                let teams = try await self.appleAuthService.fetchTeams(
+                    session: urlSession,
+                    cookies: cookies,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 if !teams.isEmpty {
                     self.availableTeams = teams
                     if self.selectedTeam == nil || !teams.contains(where: { $0.id == self.selectedTeam?.id }) {
@@ -627,7 +661,6 @@ public final class SignetAppState: ObservableObject {
         guard selectedIPA != nil,
               certificate != nil,
               profile != nil,
-              !p12Password.isEmpty,
               !pipelineStep.isBusy else {
             return false
         }
@@ -636,11 +669,19 @@ public final class SignetAppState: ObservableObject {
 
     public func startSigningOnly() {
         guard canStartSigning else { return }
+        if p12Password.isEmpty {
+            promptForCertificatePassword(message: "Please enter the password for your certificate to start signing:")
+            return
+        }
         executePipeline(shouldInstall: false)
     }
 
     public func startSignAndInstall() {
         guard canStartSigning else { return }
+        if p12Password.isEmpty {
+            promptForCertificatePassword(message: "Please enter the password for your certificate to sign and install:")
+            return
+        }
         guard let device = selectedDevice else {
             showError("Please select a target iOS device to install the app.")
             return
@@ -733,8 +774,15 @@ public final class SignetAppState: ObservableObject {
                 }
             } catch {
                 self.pipelineStep = .failed(error: error.localizedDescription)
-                self.showError(error.localizedDescription)
                 self.appendLog(LogMessage(level: .error, message: "Pipeline failed: \(error.localizedDescription)"))
+
+                if let signingError = error as? SigningError, case .invalidCertificatePassword = signingError {
+                    self.credentialService.deletePasswordFromKeychain()
+                    self.p12Password = ""
+                    self.promptForCertificatePassword(message: "The certificate password was incorrect. Please re-enter the correct password for '\(self.certificate?.commonName ?? "Certificate")':")
+                } else {
+                    self.showError(error.localizedDescription)
+                }
             }
         }
     }
@@ -773,10 +821,44 @@ public final class SignetAppState: ObservableObject {
     // MARK: - Portal Management Operations
 
     public func loadPortalData() {
-        refreshPortalDevices()
-        refreshPortalCertificates()
-        refreshPortalAppIds()
-        refreshKeychainIdentities()
+        guard let session = currentDeveloperSession else {
+            appendLog(LogMessage(level: .info, message: "[Portal] No active Apple Developer session. Sign in to view portal resources."))
+            return
+        }
+        if selectedTeam == nil, let first = availableTeams.first {
+            selectedTeam = first
+        }
+        guard let team = selectedTeam else {
+            appendLog(LogMessage(level: .info, message: "[Portal] No developer team selected. Please select a team."))
+            return
+        }
+        appendLog(LogMessage(level: .info, message: "[Portal] Loading portal resources for team: \(team.name) (\(team.id))..."))
+        isPortalLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            let (urlSession, cookies) = self.appleAuthService.makeSession(from: session)
+            let updatedCookies = await self.appleAuthService.selectPortalTeam(
+                urlSession: urlSession,
+                teamId: team.id,
+                cookies: cookies,
+                onLog: { [weak self] log in
+                    Task { @MainActor in self?.appendLog(log) }
+                }
+            )
+
+            if updatedCookies.count != cookies.count {
+                var updatedSession = session
+                updatedSession.cookiesData = AppleAuthService.encodeCookies(updatedCookies)
+                self.currentDeveloperSession = updatedSession
+                self.saveAppleDeveloperSession(updatedSession)
+            }
+
+            self.refreshPortalDevices()
+            self.refreshPortalCertificates()
+            self.refreshPortalAppIds()
+            self.refreshKeychainIdentities()
+        }
     }
 
     public func refreshPortalDevices() {
@@ -785,12 +867,20 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let devices = try await self.appleAuthService.fetchPortalDevices(session: session, team: team)
+                let devices = try await self.appleAuthService.fetchPortalDevices(
+                    session: session,
+                    team: team,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 self.portalDevices = devices
                 self.isPortalLoading = false
+                self.portalStatusMessage = "Loaded \(devices.count) registered device(s)."
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to fetch devices: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Fetch devices error: \(error.localizedDescription)"))
             }
         }
     }
@@ -801,7 +891,14 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let success = try await self.appleAuthService.deletePortalDevice(session: session, team: team, deviceId: id)
+                let success = try await self.appleAuthService.deletePortalDevice(
+                    session: session,
+                    team: team,
+                    deviceId: id,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 if success {
                     self.portalDevices.removeAll { $0.id == id }
                     self.portalStatusMessage = "Device removed successfully."
@@ -812,6 +909,7 @@ public final class SignetAppState: ObservableObject {
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to delete device: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Delete device error: \(error.localizedDescription)"))
             }
         }
     }
@@ -827,7 +925,10 @@ public final class SignetAppState: ObservableObject {
                     team: team,
                     name: name,
                     udid: udid,
-                    deviceClass: deviceClass
+                    deviceClass: deviceClass,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
                 )
                 self.portalDevices.append(dev)
                 self.portalStatusMessage = "Registered device: \(name)"
@@ -835,6 +936,7 @@ public final class SignetAppState: ObservableObject {
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to register device: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Register device error: \(error.localizedDescription)"))
             }
         }
     }
@@ -845,12 +947,20 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let certs = try await self.appleAuthService.fetchPortalCertificates(session: session, team: team)
+                let certs = try await self.appleAuthService.fetchPortalCertificates(
+                    session: session,
+                    team: team,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 self.portalCertificates = certs
                 self.isPortalLoading = false
+                self.portalStatusMessage = "Loaded \(certs.count) certificate(s)."
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to fetch certificates: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Fetch certificates error: \(error.localizedDescription)"))
             }
         }
     }
@@ -861,7 +971,15 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let success = try await self.appleAuthService.revokePortalCertificate(session: session, team: team, certificateId: id, type: type)
+                let success = try await self.appleAuthService.revokePortalCertificate(
+                    session: session,
+                    team: team,
+                    certificateId: id,
+                    type: type,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 if success {
                     self.portalCertificates.removeAll { $0.id == id }
                     self.portalStatusMessage = "Certificate revoked successfully."
@@ -872,6 +990,7 @@ public final class SignetAppState: ObservableObject {
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to revoke certificate: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Revoke certificate error: \(error.localizedDescription)"))
             }
         }
     }
@@ -882,13 +1001,22 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let data = try await self.appleAuthService.downloadPortalCertificate(session: session, team: team, certificateId: id, type: type)
+                let data = try await self.appleAuthService.downloadPortalCertificate(
+                    session: session,
+                    team: team,
+                    certificateId: id,
+                    type: type,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 try data.write(to: destinationURL)
                 self.portalStatusMessage = "Certificate downloaded to: \(destinationURL.lastPathComponent)"
                 self.isPortalLoading = false
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to download certificate: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Download certificate error: \(error.localizedDescription)"))
             }
         }
     }
@@ -899,12 +1027,20 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let appIds = try await self.appleAuthService.fetchPortalAppIds(session: session, team: team)
+                let appIds = try await self.appleAuthService.fetchPortalAppIds(
+                    session: session,
+                    team: team,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 self.portalAppIds = appIds
                 self.isPortalLoading = false
+                self.portalStatusMessage = "Loaded \(appIds.count) App ID(s)."
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to fetch App IDs: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Fetch App IDs error: \(error.localizedDescription)"))
             }
         }
     }
@@ -915,7 +1051,14 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let success = try await self.appleAuthService.deletePortalAppId(session: session, team: team, appIdId: id)
+                let success = try await self.appleAuthService.deletePortalAppId(
+                    session: session,
+                    team: team,
+                    appIdId: id,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 if success {
                     self.portalAppIds.removeAll { $0.id == id }
                     self.portalStatusMessage = "App ID deleted successfully."
@@ -926,6 +1069,7 @@ public final class SignetAppState: ObservableObject {
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to delete App ID: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Delete App ID error: \(error.localizedDescription)"))
             }
         }
     }
@@ -936,13 +1080,22 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let appId = try await self.appleAuthService.createPortalAppId(session: session, team: team, name: name, identifier: identifier)
+                let appId = try await self.appleAuthService.createPortalAppId(
+                    session: session,
+                    team: team,
+                    name: name,
+                    identifier: identifier,
+                    onLog: { [weak self] log in
+                        Task { @MainActor in self?.appendLog(log) }
+                    }
+                )
                 self.portalAppIds.append(appId)
                 self.portalStatusMessage = "Created App ID '\(identifier)'"
                 self.isPortalLoading = false
             } catch {
                 self.isPortalLoading = false
                 self.showSettingsError("Failed to create App ID: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "[Portal] Create App ID error: \(error.localizedDescription)"))
             }
         }
     }
@@ -973,7 +1126,13 @@ public final class SignetAppState: ObservableObject {
                 // If an Apple Developer session is active, try to fetch or create a wildcard profile to match
                 if let session = self.currentDeveloperSession, let team = self.selectedTeam {
                     self.appendLog(LogMessage(level: .info, message: "Resolving matching Wildcard Provisioning Profile for team '\(team.name)'..."))
-                    if let profData = await self.appleAuthService.fetchTeamWildcardProfile(session: session, team: team) {
+                    if let profData = await self.appleAuthService.fetchTeamWildcardProfile(
+                        session: session,
+                        team: team,
+                        onLog: { [weak self] log in
+                            Task { @MainActor in self?.appendLog(log) }
+                        }
+                    ) {
                         let profPath = self.credentialService.savedProfileURL
                         try profData.write(to: profPath)
                         let profInfo = try self.credentialService.importAndSaveProfile(from: profPath)

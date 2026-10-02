@@ -23,6 +23,7 @@ public struct SettingsView: View {
 
     @State var selectedTab: SettingsTab = .appleID
     @State var selectedPortalSubTab: PortalSubTab = .devices
+    @State var showPortalDiagnostics: Bool = true
 
     // Portal Manager Form State
     @State var showAddDeviceSheet: Bool = false
@@ -37,6 +38,7 @@ public struct SettingsView: View {
     @State var devicePendingDeletion: PortalDevice? = nil
     @State var certPendingRevocation: PortalCertificate? = nil
     @State var appIdPendingDeletion: PortalAppId? = nil
+    @State var certFilter: String = "all"
 
     // Manual state
     @State private var selectedP12URL: URL?
@@ -713,26 +715,106 @@ public struct SettingsView: View {
             Label("Apple Developer Certificate (.p12)", systemImage: "key.fill")
                 .font(.system(size: 13, weight: .semibold))
 
-            if let cert = appState.certificate {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(cert.commonName)
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("Team: \(cert.teamName) (\(cert.teamId)) • \(cert.validityStatusText)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+            if let selectedURL = selectedP12URL {
+                // File selected for import or replacement
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "doc.badge.plus")
+                            .font(.system(size: 16))
+                            .foregroundStyle(Color.accentColor)
+                        Text(selectedURL.lastPathComponent)
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Button("Cancel") {
+                            self.selectedP12URL = nil
+                            self.importErrorMessage = nil
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Button("Replace") {
-                        browseForP12()
+
+                    HStack(spacing: 8) {
+                        SecureField("Enter .p12 Password", text: $inputPassword)
+                            .textFieldStyle(.roundedBorder)
+
+                        Button("Import & Unlock") {
+                            performP12Import()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+
+                    if let err = importErrorMessage {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                            Text(err)
+                        }
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                    }
                 }
-                .padding(10)
-                .background(Color.green.opacity(0.1))
+                .padding(12)
+                .background(Color.accentColor.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if let cert = appState.certificate {
+                // Active certificate loaded
+                VStack(spacing: 10) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(cert.commonName)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Team: \(cert.teamName) (\(cert.teamId)) • \(cert.validityStatusText)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Replace") {
+                            browseForP12()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button(role: .destructive) {
+                            appState.removeActiveCertificate()
+                            self.inputPassword = ""
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(10)
+                    .background(Color.green.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    // Certificate Password Management row
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Certificate Password (Keychain)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 6) {
+                                SecureField("Saved Password", text: $inputPassword)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 220)
+
+                                Button("Update Password") {
+                                    appState.updateP12Password(inputPassword)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 4)
+                }
             } else {
+                // No certificate
                 VStack(spacing: 10) {
                     HStack {
                         Button {
@@ -740,32 +822,14 @@ public struct SettingsView: View {
                         } label: {
                             HStack {
                                 Image(systemName: "folder")
-                                Text(selectedP12URL?.lastPathComponent ?? "Select .p12 Certificate File")
+                                Text("Select .p12 Certificate File")
                             }
                         }
                         .buttonStyle(.bordered)
 
                         Spacer()
                     }
-
-                    if selectedP12URL != nil {
-                        HStack {
-                            SecureField("Enter .p12 Password", text: $inputPassword)
-                                .textFieldStyle(.roundedBorder)
-
-                            Button("Import Certificate") {
-                                performP12Import()
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    }
                 }
-            }
-
-            if let err = importErrorMessage {
-                Text(err)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
             }
         }
         .padding(14)
@@ -1025,10 +1089,12 @@ public struct SettingsView: View {
 
     private func performP12Import() {
         guard let url = selectedP12URL else { return }
-        appState.importP12(from: url, password: inputPassword)
-        if appState.certificate != nil {
+        do {
+            try appState.importP12(from: url, password: inputPassword)
             self.importErrorMessage = nil
             self.selectedP12URL = nil
+        } catch {
+            self.importErrorMessage = error.localizedDescription
         }
     }
 }

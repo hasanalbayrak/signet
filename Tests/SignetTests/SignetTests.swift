@@ -285,4 +285,42 @@ final class SignetTests: XCTestCase {
         XCTAssertNil(mac)
         #endif
     }
+
+    func testPortalCertificateDistributionAndTeamScopes() {
+        let distCert = PortalCertificate(
+            id: "CERT_DIST_1",
+            name: "Apple Distribution: Example Company (XYZ)",
+            type: "WXV89964HE",
+            typeDisplayName: "Apple Distribution",
+            status: "Issued",
+            ownerName: "Example Company",
+            ownerType: "team"
+        )
+        XCTAssertTrue(distCert.isDistribution)
+        XCTAssertTrue(distCert.isTeamScoped)
+
+        let devCert = PortalCertificate(
+            id: "CERT_DEV_1",
+            name: "Apple Development: Hasan Albayrak (123)",
+            type: "83Q87W3TGH",
+            typeDisplayName: "Apple Development",
+            status: "Issued",
+            ownerName: "Hasan Albayrak",
+            ownerType: "personal"
+        )
+        XCTAssertFalse(devCert.isDistribution)
+        XCTAssertFalse(devCert.isTeamScoped)
+
+        let iosDistCert = PortalCertificate(
+            id: "CERT_IOS_DIST",
+            name: "iPhone Distribution: Team Corp",
+            type: "R5DG2F3R6A",
+            typeDisplayName: "iOS Distribution",
+            status: "Issued",
+            ownerName: "Team Corp",
+            ownerType: "team"
+        )
+        XCTAssertTrue(iosDistCert.isDistribution)
+        XCTAssertTrue(iosDistCert.isTeamScoped)
+    }
 }

@@ -41,6 +41,9 @@ public struct MainView: View {
         .sheet(isPresented: $appState.showSettingsSheet) {
             SettingsView(appState: appState)
         }
+        .sheet(isPresented: $appState.showPasswordPrompt) {
+            CertificatePasswordPromptView(appState: appState)
+        }
         .alert("Signet Error", isPresented: $appState.showErrorAlert) {
             Button("OK", role: .cancel) {}
         } message: {

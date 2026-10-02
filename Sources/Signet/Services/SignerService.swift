@@ -4,6 +4,7 @@ public enum SigningError: LocalizedError {
     case zsignBinaryNotFound
     case inputFileNotFound(String)
     case outputCreationFailed
+    case invalidCertificatePassword(String)
     case signingFailed(String)
     case cancelled
 
@@ -15,6 +16,8 @@ public enum SigningError: LocalizedError {
             return "Input IPA file not found at: \(path)"
         case .outputCreationFailed:
             return "Could not create destination output directory."
+        case .invalidCertificatePassword(let msg):
+            return "Invalid certificate password: \(msg)"
         case .signingFailed(let reason):
             return "Signing failed: \(reason)"
         case .cancelled:
@@ -139,6 +142,10 @@ public final class SignerService: @unchecked Sendable {
         } else {
             let reason = state.lastErrorLine.isEmpty ? (result.output.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).last ?? "Process exited with code \(result.exitCode)") : state.lastErrorLine
             onLog?(LogMessage(level: .error, message: "Signing failed: \(reason)"))
+            let lower = reason.lowercased()
+            if lower.contains("password") || lower.contains("pkcs12") || lower.contains("mac verify") || lower.contains("bad decrypt") {
+                throw SigningError.invalidCertificatePassword(reason)
+            }
             throw SigningError.signingFailed(reason)
         }
     }

@@ -128,10 +128,40 @@ extension SettingsView {
                 case .appIds:
                     portalAppIdsSubView()
                 }
+
+                // Portal Diagnostics Section
+                portalDiagnosticsSection()
             }
             .onAppear {
                 if appState.portalDevices.isEmpty && appState.portalCertificates.isEmpty {
                     appState.loadPortalData()
+                }
+            }
+        } else if !appState.availableTeams.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "person.2.badge.gearshape")
+                    .font(.system(size: 32))
+                    .foregroundStyle(Color.accentColor)
+                Text("Select Developer Team")
+                    .font(.system(size: 14, weight: .bold))
+                Text("Your account has access to \(appState.availableTeams.count) developer team(s). Select a team to load portal data:")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Picker("Team:", selection: $appState.selectedTeam) {
+                    ForEach(appState.availableTeams) { t in
+                        Text("\(t.name) (\(t.id))").tag(Optional(t))
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 300)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+            .onAppear {
+                if appState.selectedTeam == nil {
+                    appState.selectedTeam = appState.availableTeams.first
                 }
             }
         } else {
@@ -139,11 +169,22 @@ extension SettingsView {
                 Image(systemName: "person.2.slash.fill")
                     .font(.system(size: 32))
                     .foregroundStyle(.secondary)
-                Text("No Developer Team Selected")
+                Text("No Developer Teams Found")
                     .font(.system(size: 14, weight: .bold))
-                Text("Select your developer team in the Apple ID tab to view portal assets.")
+                Text("Click below to refresh available developer teams from your Apple Developer account.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+
+                Button {
+                    appState.refreshAppleDeveloperTeams()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Refresh Teams")
+                    }
+                    .font(.system(size: 12))
+                }
+                .buttonStyle(.borderedProminent)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 40)
@@ -323,6 +364,16 @@ extension SettingsView {
 
                 Spacer()
 
+                // Filter Picker
+                Picker("", selection: $certFilter) {
+                    Text("All (\(appState.portalCertificates.count))").tag("all")
+                    Text("Distribution (\(appState.portalCertificates.filter { $0.isDistribution }.count))").tag("distribution")
+                    Text("Development (\(appState.portalCertificates.filter { !$0.isDistribution }.count))").tag("development")
+                    Text("Team (\(appState.portalCertificates.filter { $0.isTeamScoped }.count))").tag("team")
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 320)
+
                 Button {
                     appState.refreshPortalCertificates()
                     appState.refreshKeychainIdentities()
@@ -337,8 +388,17 @@ extension SettingsView {
                 .controlSize(.small)
             }
 
-            if appState.portalCertificates.isEmpty {
-                Text(appState.isPortalLoading ? "Loading certificates..." : "No active certificates found in this team.")
+            let filteredCerts = appState.portalCertificates.filter { cert in
+                switch certFilter {
+                case "distribution": return cert.isDistribution
+                case "development": return !cert.isDistribution
+                case "team": return cert.isTeamScoped
+                default: return true
+                }
+            }
+
+            if filteredCerts.isEmpty {
+                Text(appState.isPortalLoading ? "Loading certificates..." : "No certificates match the selected filter (\(certFilter)).")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
@@ -347,29 +407,80 @@ extension SettingsView {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 VStack(spacing: 6) {
-                    ForEach(appState.portalCertificates) { cert in
+                    ForEach(filteredCerts) { cert in
+                        let matchingLocal = appState.keychainIdentities.first(where: {
+                            $0.name.localizedCaseInsensitiveContains(cert.name) ||
+                            cert.name.localizedCaseInsensitiveContains($0.name) ||
+                            (cert.ownerName != nil && $0.name.localizedCaseInsensitiveContains(cert.ownerName!))
+                        })
+
                         HStack(spacing: 12) {
-                            Image(systemName: "checkmark.seal.fill")
+                            Image(systemName: cert.isDistribution ? "shippingbox.fill" : "checkmark.seal.fill")
                                 .font(.system(size: 18))
-                                .foregroundStyle(Color.green)
+                                .foregroundStyle(cert.isDistribution ? Color.purple : Color.blue)
                                 .frame(width: 24)
 
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
                                     Text(cert.name)
                                         .font(.system(size: 12, weight: .semibold))
-                                    Text("(\(cert.typeDisplayName))")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
+
+                                    // Distribution vs Development Badge
+                                    Text(cert.isDistribution ? "Distribution" : "Development")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(cert.isDistribution ? Color.purple.opacity(0.15) : Color.blue.opacity(0.15))
+                                        .foregroundStyle(cert.isDistribution ? Color.purple : Color.blue)
+                                        .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                                    // Team vs Personal Badge
+                                    if cert.isTeamScoped {
+                                        Text("Team Scoped")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.indigo.opacity(0.15))
+                                            .foregroundStyle(Color.indigo)
+                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    } else {
+                                        Text("Personal")
+                                            .font(.system(size: 9, weight: .medium))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.secondary.opacity(0.15))
+                                            .foregroundStyle(Color.secondary)
+                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    }
+
+                                    if matchingLocal != nil {
+                                        Text("Key on Mac")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.green.opacity(0.15))
+                                            .foregroundStyle(Color.green)
+                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    }
                                 }
 
                                 HStack(spacing: 8) {
-                                    Text("ID: `\(cert.id)`")
+                                    Text("Type: \(cert.typeDisplayName)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+
+                                    Text("• ID: `\(cert.id)`")
                                         .font(.system(size: 10, design: .monospaced))
                                         .foregroundStyle(.secondary)
 
                                     if let exp = cert.expirationDate {
                                         Text("• Exp: \(exp.prefix(10))")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    if let owner = cert.ownerName, !owner.isEmpty && owner != cert.name {
+                                        Text("• Owner: \(owner)")
                                             .font(.system(size: 10))
                                             .foregroundStyle(.secondary)
                                     }
@@ -386,6 +497,19 @@ extension SettingsView {
                                 .background(cert.isIssued ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
                                 .foregroundStyle(cert.isIssued ? Color.green : Color.red)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                            // Use for signing if local key is found
+                            if let localKey = matchingLocal {
+                                Button {
+                                    appState.useLocalKeychainIdentity(localKey)
+                                } label: {
+                                    Text("Use This")
+                                        .font(.system(size: 10, weight: .bold))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.mini)
+                                .help("Activate this certificate and its local private key for signing")
+                            }
 
                             // Download .cer
                             Button {
@@ -769,6 +893,114 @@ extension SettingsView {
 
         if panel.runModal() == .OK, let targetURL = panel.url {
             appState.downloadPortalCertificate(id: cert.id, type: cert.type, destinationURL: targetURL)
+        }
+    }
+
+    // MARK: - Diagnostics Section
+
+    @ViewBuilder
+    private func portalDiagnosticsSection() -> some View {
+        let portalLogs = appState.logs.filter { $0.message.contains("[Portal]") }
+
+        DisclosureGroup(isExpanded: $showPortalDiagnostics) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Live HTTP Traffic & Diagnostics (\(portalLogs.count) events)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        let text = portalLogs.map { "\($0.formattedTime) [\($0.level.rawValue.uppercased())] \($0.message)" }.joined(separator: "\n")
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                        appState.portalStatusMessage = "Diagnostic log copied to clipboard!"
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.on.doc")
+                            Text("Copy Log")
+                        }
+                        .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+
+                    Button {
+                        appState.logs.removeAll { $0.message.contains("[Portal]") }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                            Text("Clear")
+                        }
+                        .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(.top, 4)
+
+                ScrollViewReader { _ in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            if portalLogs.isEmpty {
+                                Text("No portal network traffic logged yet. Click 'Refresh All' to fetch portal data.")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 8)
+                            } else {
+                                ForEach(Array(portalLogs.enumerated()), id: \.offset) { idx, log in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text(log.formattedTime)
+                                            .font(.system(size: 9, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 55, alignment: .leading)
+                                        Text(log.message)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(diagnosticColor(for: log.level))
+                                            .textSelection(.enabled)
+                                    }
+                                    .id(idx)
+                                }
+                            }
+                        }
+                        .padding(8)
+                    }
+                    .frame(height: 140)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.8))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(Color.accentColor)
+                Text("Portal Network Diagnostics")
+                    .font(.system(size: 12, weight: .semibold))
+                if !portalLogs.isEmpty {
+                    Text("\(portalLogs.count)")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.15))
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func diagnosticColor(for level: LogMessage.Level) -> Color {
+        switch level {
+        case .error: return .red
+        case .warning: return .orange
+        case .success: return .green
+        case .info: return .primary
+        case .verbose: return .secondary
         }
     }
 }

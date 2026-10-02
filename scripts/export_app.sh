@@ -6,18 +6,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_DIR="$PROJECT_ROOT/Signet.app"
 
-echo "==> 🔨 Building Signet in Release mode..."
+echo "==> Building Signet in Release mode..."
 cd "$PROJECT_ROOT"
 swift build -c release
 
 # Find release executable
 RELEASE_BIN="$(find "$PROJECT_ROOT/.build" -path "*/Release/Signet" -type f -perm +111 | head -n 1)"
 if [ -z "$RELEASE_BIN" ] || [ ! -f "$RELEASE_BIN" ]; then
-    echo "❌ Error: Could not find compiled Signet binary."
+    echo "Error: Could not find compiled Signet binary."
     exit 1
 fi
 
-echo "==> 📦 Packaging Signet.app bundle..."
+echo "==> Packaging Signet.app bundle..."
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources/bin"
@@ -74,11 +74,11 @@ cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
 EOF
 
 # 4. Ad-hoc codesign
-echo "==> ✍️ Signing application bundle with ad-hoc signature..."
+echo "==> Signing application bundle with ad-hoc signature..."
 codesign --force --deep --sign - "$APP_DIR"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
-echo "==> ✅ Successfully exported Signet to:"
+echo "==> Successfully exported Signet to:"
 echo "    $APP_DIR"
 echo ""
 echo "To run Signet now:"

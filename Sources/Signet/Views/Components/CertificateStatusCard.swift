@@ -80,17 +80,31 @@ public struct CertificateStatusCard: View {
             Spacer()
 
             // Settings/Manage Action Button
-            Button {
-                appState.showSettingsSheet = true
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: appState.certificate != nil ? "gearshape" : "plus.circle.fill")
-                    Text(appState.certificate != nil ? "Manage" : "Configure")
+            HStack(spacing: 6) {
+                if appState.certificate != nil {
+                    Button {
+                        appState.promptForCertificatePassword(message: "Update password for \(appState.certificate?.commonName ?? "Certificate"):")
+                    } label: {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Change or Re-enter Certificate Password")
                 }
-                .font(.system(size: 12, weight: .medium))
+
+                Button {
+                    appState.showSettingsSheet = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: appState.certificate != nil ? "gearshape" : "plus.circle.fill")
+                        Text(appState.certificate != nil ? "Manage" : "Configure")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(12)
         .background(

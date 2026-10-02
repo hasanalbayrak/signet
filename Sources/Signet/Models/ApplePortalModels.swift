@@ -45,6 +45,7 @@ public struct PortalCertificate: Identifiable, Hashable, Codable, Sendable {
     public let canDownload: Bool
     public let canRevoke: Bool
     public let ownerName: String?
+    public let ownerType: String?
 
     public init(
         id: String,
@@ -55,7 +56,8 @@ public struct PortalCertificate: Identifiable, Hashable, Codable, Sendable {
         expirationDate: String? = nil,
         canDownload: Bool = true,
         canRevoke: Bool = true,
-        ownerName: String? = nil
+        ownerName: String? = nil,
+        ownerType: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -66,10 +68,29 @@ public struct PortalCertificate: Identifiable, Hashable, Codable, Sendable {
         self.canDownload = canDownload
         self.canRevoke = canRevoke
         self.ownerName = ownerName
+        self.ownerType = ownerType
     }
 
     public var isIssued: Bool {
         return status.lowercased() == "issued" || status.lowercased() == "active"
+    }
+
+    public var isDistribution: Bool {
+        typeDisplayName.localizedCaseInsensitiveContains("Distribution") ||
+        name.localizedCaseInsensitiveContains("Distribution") ||
+        type == "WXV89964HE" ||
+        type == "R58UK2EWSO" ||
+        type == "9RQEK7MSXA" ||
+        type == "HXZEUKP0FP" ||
+        type == "2PQI8IDXNH"
+    }
+
+    public var isTeamScoped: Bool {
+        if let ot = ownerType?.lowercased() {
+            if ot == "team" || ot == "organization" { return true }
+            if ot == "personal" || ot == "individual" { return false }
+        }
+        return isDistribution
     }
 }
 

@@ -675,6 +675,7 @@ public final class AppleAuthService: @unchecked Sendable {
         }
 
         var certResult: CertPackage? = nil
+        var isDistributionCert = false
         if let local = matchingLocal {
             onLog?(LogMessage(level: .info, message: "Discovered active Keychain identity '\(local.name)' matching team '\(team.name)'!"))
             onLog?(LogMessage(level: .info, message: "Exporting matching local certificate to bypass Apple team limits..."))
@@ -687,6 +688,7 @@ public final class AppleAuthService: @unchecked Sendable {
                     $0.isIssued && (local.name.contains($0.name) || $0.name.contains(local.name) || ($0.ownerName != nil && local.name.contains($0.ownerName!)))
                 }) ?? portalCerts.first(where: { $0.isIssued })
                 let cId = matchingCert?.id ?? ""
+                isDistributionCert = matchingCert?.isDistribution ?? (local.name.localizedCaseInsensitiveContains("Distribution"))
                 certResult = CertPackage(certId: cId, p12Data: p12Data, password: pwd)
                 onLog?(LogMessage(level: .success, message: "Successfully prepared local developer identity for code signing."))
             } catch {
@@ -717,6 +719,7 @@ public final class AppleAuthService: @unchecked Sendable {
             urlSession: urlSession,
             team: team,
             certId: resolvedCert.certId,
+            isDistribution: isDistributionCert,
             deviceId: registeredDeviceId,
             cookies: cookieList,
             onLog: onLog
@@ -749,6 +752,38 @@ public final class AppleAuthService: @unchecked Sendable {
         cookies: [HTTPCookie],
         onLog: (@Sendable (LogMessage) -> Void)?
     ) async throws -> String? {
+        let isMac = device.isAppleSiliconMac || device.connectionType == .local
+        let basePath = isMac ? "mac" : "ios"
+
+        // 1. Check if device is already registered in team
+        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/\(basePath)/device/listDevices.action")!
+        let listParams: [String: String] = [
+            "teamId": team.id,
+            "pageNumber": "1",
+            "pageSize": "500",
+            "sort": "name=asc"
+        ]
+        let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: listParams, cookies: cookies)
+        if let listRes = try? await executePortalRequest(listReq, session: urlSession, operationName: "listDevices (check existing)", onLog: onLog),
+           let json = listRes.json,
+           let devices = json["devices"] as? [[String: Any]] {
+            if let match = devices.first(where: {
+                let dNum = ($0["deviceNumber"] as? String) ?? ""
+                return dNum.caseInsensitiveCompare(device.udid) == .orderedSame
+            }),
+            let id = (match["deviceId"] as? String) ?? (match["id"] as? String) {
+                onLog?(LogMessage(level: .info, message: "Device already registered in team '\(team.name)' (ID: \(id))."))
+                return id
+            }
+        }
+
+        // Local Apple Silicon Mac apps run directly from /Applications without portal device registration
+        if isMac {
+            onLog?(LogMessage(level: .info, message: "Apple Silicon Mac detected ('\(device.displayName)'). Local apps execute directly without portal device registration."))
+            return nil
+        }
+
+        // 2. Register iOS device if not found
         let addURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/addDevices.action")!
         let params: [String: String] = [
             "teamId": team.id,
@@ -765,19 +800,6 @@ public final class AppleAuthService: @unchecked Sendable {
            let id = (first["deviceId"] as? String) ?? (first["id"] as? String) {
             onLog?(LogMessage(level: .success, message: "Device registered in team '\(team.name)': \(device.displayName) (ID: \(id))"))
             return id
-        }
-
-        // Check if device is already registered in team
-        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
-        let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
-        if let listRes = try? await executePortalRequest(listReq, session: urlSession, operationName: "listDevices (check existing)", onLog: onLog),
-           let json = listRes.json,
-           let devices = json["devices"] as? [[String: Any]] {
-            if let match = devices.first(where: { ($0["deviceNumber"] as? String) == device.udid }),
-               let id = (match["deviceId"] as? String) ?? (match["id"] as? String) {
-                onLog?(LogMessage(level: .info, message: "Device already registered in team '\(team.name)' (ID: \(id))."))
-                return id
-            }
         }
 
         return nil
@@ -980,6 +1002,7 @@ public final class AppleAuthService: @unchecked Sendable {
         urlSession: URLSession,
         team: DeveloperTeam,
         certId: String,
+        isDistribution: Bool = false,
         deviceId: String?,
         cookies: [HTTPCookie],
         onLog: (@Sendable (LogMessage) -> Void)?
@@ -988,31 +1011,76 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // 1. Try Xcode API for instant profile retrieval (contains base64 encodedProfile)
         let xcodeURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action")!
-        let xcodeParams = [
+        let xcodeParams: [String: Any] = [
             "teamId": team.id,
-            "includeInactiveProfiles": "true",
-            "includeExpiredProfiles": "false",
-            "onlyCountLists": "true"
+            "includeInactiveProfiles": true,
+            "includeExpiredProfiles": false
         ]
-        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies)
+        let xcodeReq = makeXcodePlistRequest(url: xcodeURL, params: xcodeParams, cookies: cookies)
 
         if let xcRes = try? await executePortalRequest(xcodeReq, session: urlSession, operationName: "listProvisioningProfiles (Xcode)", onLog: onLog),
            xcRes.response.statusCode == 200,
-           let plist = try? PropertyListSerialization.propertyList(from: xcRes.data, options: [], format: nil) as? [String: Any],
-           let profiles = plist["provisioningProfiles"] as? [[String: Any]] {
+           let plist = (try? PropertyListSerialization.propertyList(from: xcRes.data, options: [], format: nil) as? [String: Any]) ?? xcRes.json,
+           let profiles = plist["provisioningProfiles"] as? [[String: Any]], !profiles.isEmpty {
 
-            for prof in profiles {
+            let wildcardProf = profiles.first(where: {
+                let name = ($0["name"] as? String) ?? ""
+                let appId = (($0["appId"] as? [String: Any])?["identifier"] as? String) ?? ""
+                return name.contains("*") || appId.contains("*")
+            }) ?? profiles.first
+
+            if let prof = wildcardProf {
                 if let encodedData = prof["encodedProfile"] as? Data {
-                    onLog?(LogMessage(level: .success, message: "Retrieved Wildcard Provisioning Profile via Xcode API!"))
+                    onLog?(LogMessage(level: .success, message: "Retrieved Provisioning Profile via Xcode API!"))
                     return encodedData
                 } else if let b64Str = prof["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64Str) {
-                    onLog?(LogMessage(level: .success, message: "Retrieved Wildcard Provisioning Profile via Xcode API!"))
+                    onLog?(LogMessage(level: .success, message: "Retrieved Provisioning Profile via Xcode API!"))
                     return decoded
                 }
             }
         }
 
-        // 2. Find or create App ID (Bundle ID)
+        // 2. Check existing profiles on Developer Portal
+        onLog?(LogMessage(level: .info, message: "Checking existing profiles on Apple Developer Portal..."))
+        let listProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/listProvisioningProfiles.action")!
+        let listProfParams = [
+            "teamId": team.id,
+            "pageNumber": "1",
+            "pageSize": "500",
+            "sort": "name=asc"
+        ]
+        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: listProfParams, cookies: cookies)
+        if let lRes = try? await executePortalRequest(listProfReq, session: urlSession, operationName: "listProvisioningProfiles (Portal)", onLog: onLog),
+           let json = lRes.json,
+           let profiles = json["provisioningProfiles"] as? [[String: Any]], !profiles.isEmpty {
+
+            let activeProfiles = profiles.filter {
+                let status = ($0["status"] as? String) ?? ($0["statusString"] as? String) ?? ""
+                return status.caseInsensitiveCompare("Active") == .orderedSame || status.caseInsensitiveCompare("Issued") == .orderedSame || status.isEmpty
+            }
+
+            let candidate = activeProfiles.first(where: {
+                let name = ($0["name"] as? String) ?? ""
+                return name.contains("*") || name.localizedCaseInsensitiveContains("wildcard")
+            }) ?? activeProfiles.first
+
+            if let chosen = candidate, let pId = (chosen["provisioningProfileId"] as? String) ?? (chosen["id"] as? String), !pId.isEmpty {
+                if let b64 = chosen["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
+                    onLog?(LogMessage(level: .success, message: "Retrieved existing active profile: \(chosen["name"] as? String ?? pId)"))
+                    return decoded
+                }
+
+                let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
+                let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (existing)", onLog: onLog),
+                   dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
+                    onLog?(LogMessage(level: .success, message: "Downloaded existing active profile: \(chosen["name"] as? String ?? pId)"))
+                    return dlRes.data
+                }
+            }
+        }
+
+        // 3. Find or create App ID (Bundle ID)
         onLog?(LogMessage(level: .info, message: "Ensuring Wildcard App ID exists on Apple Developer Portal..."))
         let listAppIdsURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/listAppIds.action")!
         let listAppParams = ["teamId": team.id, "pageNumber": "1", "pageSize": "500", "sort": "name=asc"]
@@ -1050,37 +1118,33 @@ public final class AppleAuthService: @unchecked Sendable {
             }
         }
 
-        // 3. Create or download Provisioning Profile via Developer Portal
-        var targetCertId = certId
-        if targetCertId.isEmpty || targetCertId == "LOCAL_CERT" {
-            let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
-            let certParams = [
-                "teamId": team.id,
-                "pageNumber": "1",
-                "pageSize": "100",
-                "sort": "certRequestStatusCode=asc",
-                "types": "5QPB9NHCEQ,R5DG2F3R6A,83Q87W3TGH,B73J52Q545,LH4T963KP2,92Y3FF6462"
-            ]
-            let req = makePortalRequest(url: listURL, method: "POST", bodyParams: certParams, cookies: cookies, urlSession: urlSession)
-            if let res = try? await executePortalRequest(req, session: urlSession, operationName: "listCertRequests (for Profile)", onLog: onLog),
-               res.response.statusCode == 200, let json = res.json,
-               let certs = (json["certRequests"] as? [[String: Any]]) ?? (json["certificates"] as? [[String: Any]]) {
-                for c in certs {
-                    if let cid = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String), !cid.isEmpty {
-                        targetCertId = cid
-                        onLog?(LogMessage(level: .info, message: "Associated provisioning profile with active portal certificate: \(cid)"))
-                        break
-                    }
+        // 4. Query registered devices to attach to profile
+        var allDeviceIds: [String] = []
+        if let dId = deviceId, !dId.isEmpty {
+            allDeviceIds.append(dId)
+        }
+        let listDevURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
+        let devParams = ["teamId": team.id, "pageNumber": "1", "pageSize": "500", "sort": "name=asc"]
+        let devReq = makePortalRequest(url: listDevURL, method: "POST", bodyParams: devParams, cookies: cookies)
+        if let devRes = try? await executePortalRequest(devReq, session: urlSession, operationName: "listDevices (for Profile)", onLog: onLog),
+           let json = devRes.json,
+           let devList = json["devices"] as? [[String: Any]] {
+            for d in devList {
+                if let did = (d["deviceId"] as? String) ?? (d["id"] as? String), !did.isEmpty, !allDeviceIds.contains(did) {
+                    allDeviceIds.append(did)
                 }
             }
         }
 
+        // 5. Create Provisioning Profile via Developer Portal
+        let targetCertId = certId
         let profName = "Signet Wildcard \(Int.random(in: 100...999))"
         let createProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/createProvisioningProfile.action")!
         var createParams: [String: String] = [
             "teamId": team.id,
             "provisioningProfileName": profName,
-            "distributionType": "limited"
+            "distributionType": isDistribution ? (allDeviceIds.isEmpty ? "store" : "adhoc") : "limited",
+            "subPlatform": "multios"
         ]
         if !targetCertId.isEmpty && targetCertId != "LOCAL_CERT" {
             createParams["certificateIds"] = targetCertId
@@ -1088,8 +1152,8 @@ public final class AppleAuthService: @unchecked Sendable {
         if !appIdId.isEmpty {
             createParams["appIdId"] = appIdId
         }
-        if let dId = deviceId {
-            createParams["deviceIds"] = dId
+        if !allDeviceIds.isEmpty {
+            createParams["deviceIds"] = allDeviceIds.joined(separator: ",")
         }
 
         let createProfReq = makePortalRequest(url: createProfURL, method: "POST", bodyParams: createParams, cookies: cookies)
@@ -1105,7 +1169,7 @@ public final class AppleAuthService: @unchecked Sendable {
             }
         }
 
-        // 4. Download profile content if created
+        // 6. Download profile content if created
         if !profileId.isEmpty {
             let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(profileId)")!
             let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
@@ -1113,26 +1177,6 @@ public final class AppleAuthService: @unchecked Sendable {
                dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
                 onLog?(LogMessage(level: .success, message: "Downloaded profile: \(profName)"))
                 return dlRes.data
-            }
-        }
-
-        // 5. Fallback: check existing profiles on portal
-        let listProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/listProvisioningProfiles.action")!
-        let listProfParams = ["teamId": team.id, "pageNumber": "1", "pageSize": "500"]
-        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: listProfParams, cookies: cookies)
-        if let lRes = try? await executePortalRequest(listProfReq, session: urlSession, operationName: "listProvisioningProfiles", onLog: onLog),
-           let json = lRes.json,
-           let profiles = json["provisioningProfiles"] as? [[String: Any]] {
-            for prof in profiles {
-                if let pId = prof["provisioningProfileId"] as? String {
-                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
-                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
-                    if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (existing)", onLog: onLog),
-                       dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
-                        onLog?(LogMessage(level: .info, message: "Downloaded active team profile."))
-                        return dlRes.data
-                    }
-                }
             }
         }
 
@@ -1234,43 +1278,108 @@ public final class AppleAuthService: @unchecked Sendable {
 
         onLog?(LogMessage(level: .info, message: "[Portal] Querying registered devices for team \(team.name) (\(team.id))..."))
 
-        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
+        var result: [PortalDevice] = []
+        var seenIds = Set<String>()
+
+        // 1. Modern REST API (returns all devices: iOS, macOS, watchOS, tvOS)
+        let v1Urls = [
+            "https://developer.apple.com/services-account/v1/devices",
+            "https://appstoreconnect.apple.com/iris/v1/devices"
+        ]
+        for urlString in v1Urls {
+            guard let url = URL(string: urlString) else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/vnd.api+json, application/json", forHTTPHeaderField: "Accept")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue(team.id, forHTTPHeaderField: "X-Apple-Developer-Team-Id")
+            req.setValue(team.id, forHTTPHeaderField: "X-Apple-Team-Id")
+            if !cookies.isEmpty {
+                let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
+            if let res = try? await executePortalRequest(req, session: urlSession, operationName: "v1/devices (\(url.host ?? ""))", onLog: onLog),
+               res.response.statusCode == 200, let dict = res.json, let dataArr = dict["data"] as? [[String: Any]], !dataArr.isEmpty {
+                for item in dataArr {
+                    let id = (item["id"] as? String) ?? ""
+                    let attrs = (item["attributes"] as? [String: Any]) ?? [:]
+                    let name = (attrs["name"] as? String) ?? "Unnamed Device"
+                    let udid = (attrs["udid"] as? String) ?? ""
+                    let dClass = ((attrs["deviceClass"] as? String) ?? "iphone").lowercased()
+                    let model = attrs["model"] as? String
+                    let status = (attrs["status"] as? String) ?? "PROCESSING"
+                    let isEnabled = status.uppercased() == "ENABLED" || status.uppercased() == "Y"
+                    if !id.isEmpty && !udid.isEmpty && !seenIds.contains(id) {
+                        seenIds.insert(id)
+                        result.append(PortalDevice(id: id, name: name, udid: udid, deviceClass: dClass, model: model, status: isEnabled ? "Y" : "N"))
+                    }
+                }
+                if !result.isEmpty {
+                    onLog?(LogMessage(level: .success, message: "[Portal] Discovered \(result.count) device(s) via modern REST API."))
+                    return result
+                }
+            }
+        }
+
+        // 2. iOS Devices
+        let iosListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
         let params: [String: String] = [
             "teamId": team.id,
             "pageNumber": "1",
             "pageSize": "500",
             "sort": "name=asc"
         ]
-        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
+        let req = makePortalRequest(url: iosListURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
 
-        do {
-            let res = try await executePortalRequest(req, session: urlSession, operationName: "listDevices.action", onLog: onLog)
-            if res.response.statusCode == 200, let dict = res.json, let devices = dict["devices"] as? [[String: Any]], !devices.isEmpty {
-                let parsed = parseDevices(devices)
-                onLog?(LogMessage(level: .success, message: "[Portal] Found \(parsed.count) device(s) via developer portal."))
-                return parsed
+        if let res = try? await executePortalRequest(req, session: urlSession, operationName: "ios/listDevices.action", onLog: onLog),
+           res.response.statusCode == 200, let dict = res.json, let devices = dict["devices"] as? [[String: Any]], !devices.isEmpty {
+            let parsed = parseDevices(devices)
+            for d in parsed {
+                if !seenIds.contains(d.id) {
+                    seenIds.insert(d.id)
+                    result.append(d)
+                }
             }
-        } catch {
-            onLog?(LogMessage(level: .warning, message: "[Portal] listDevices failed: \(error.localizedDescription)"))
         }
 
-        // Fallback to Xcode endpoint
-        onLog?(LogMessage(level: .info, message: "[Portal] Trying Xcode listDevices endpoint fallback..."))
-        let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listDevices.action")!
-        let xcReq = makeXcodePlistRequest(url: xcURL, params: ["teamId": team.id, "pageSize": 500, "pageNumber": 1], cookies: cookies)
-        do {
-            let res = try await executePortalRequest(xcReq, session: urlSession, operationName: "developerservices2/listDevices.action", onLog: onLog)
-            if res.response.statusCode == 200, let dict = res.json, let devices = dict["devices"] as? [[String: Any]] {
-                let parsed = parseDevices(devices)
-                onLog?(LogMessage(level: .success, message: "[Portal] Found \(parsed.count) device(s) via Xcode endpoint."))
-                return parsed
+        // 3. Mac Devices
+        let macListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/mac/device/listDevices.action")!
+        let macReq = makePortalRequest(url: macListURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
+        if let res = try? await executePortalRequest(macReq, session: urlSession, operationName: "mac/listDevices.action", onLog: onLog),
+           res.response.statusCode == 200, let dict = res.json, let devices = dict["devices"] as? [[String: Any]], !devices.isEmpty {
+            let parsed = parseDevices(devices)
+            for d in parsed {
+                if !seenIds.contains(d.id) {
+                    seenIds.insert(d.id)
+                    result.append(d)
+                }
             }
-        } catch {
-            onLog?(LogMessage(level: .error, message: "[Portal] Xcode listDevices failed: \(error.localizedDescription)"))
         }
 
-        onLog?(LogMessage(level: .info, message: "[Portal] No registered devices found for team \(team.id)."))
-        return []
+        // 4. Xcode endpoint fallback
+        if result.isEmpty {
+            let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listDevices.action")!
+            let xcReq = makeXcodePlistRequest(url: xcURL, params: ["teamId": team.id, "pageSize": 500, "pageNumber": 1], cookies: cookies)
+            if let res = try? await executePortalRequest(xcReq, session: urlSession, operationName: "developerservices2/listDevices.action", onLog: onLog),
+               res.response.statusCode == 200,
+               let dict = (try? PropertyListSerialization.propertyList(from: res.data, options: [], format: nil) as? [String: Any]) ?? res.json,
+               let devices = dict["devices"] as? [[String: Any]] {
+                let parsed = parseDevices(devices)
+                for d in parsed {
+                    if !seenIds.contains(d.id) {
+                        seenIds.insert(d.id)
+                        result.append(d)
+                    }
+                }
+            }
+        }
+
+        if !result.isEmpty {
+            onLog?(LogMessage(level: .success, message: "[Portal] Found \(result.count) device(s) for team \(team.id)."))
+        } else {
+            onLog?(LogMessage(level: .info, message: "[Portal] No registered devices found for team \(team.id)."))
+        }
+        return result
     }
 
     private func parseDevices(_ devices: [[String: Any]]) -> [PortalDevice] {
@@ -1817,33 +1926,77 @@ public final class AppleAuthService: @unchecked Sendable {
         let cookies = await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: initialCookies, onLog: onLog)
 
         onLog?(LogMessage(level: .info, message: "[Portal] Querying provisioning profiles for team \(team.name)..."))
+
+        // 1. First try Xcode plist API
         let xcodeURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action")!
-        let xcodeParams = [
+        let xcodeParams: [String: Any] = [
             "teamId": team.id,
-            "includeInactiveProfiles": "true",
-            "includeExpiredProfiles": "false",
-            "onlyCountLists": "true"
+            "includeInactiveProfiles": true,
+            "includeExpiredProfiles": false
         ]
-        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies, urlSession: urlSession)
+        let xcodeReq = makeXcodePlistRequest(url: xcodeURL, params: xcodeParams, cookies: cookies)
 
-        do {
-            let res = try await executePortalRequest(xcodeReq, session: urlSession, operationName: "listProvisioningProfiles.action", onLog: onLog)
-            if res.response.statusCode == 200,
-               let plist = try? PropertyListSerialization.propertyList(from: res.data, options: [], format: nil) as? [String: Any],
-               let profiles = plist["provisioningProfiles"] as? [[String: Any]] {
+        if let res = try? await executePortalRequest(xcodeReq, session: urlSession, operationName: "listProvisioningProfiles (Xcode)", onLog: onLog),
+           res.response.statusCode == 200,
+           let plist = (try? PropertyListSerialization.propertyList(from: res.data, options: [], format: nil) as? [String: Any]) ?? res.json,
+           let profiles = plist["provisioningProfiles"] as? [[String: Any]], !profiles.isEmpty {
 
-                onLog?(LogMessage(level: .info, message: "[Portal] Received \(profiles.count) provisioning profile(s) from Apple."))
-                for prof in profiles {
-                    if let encodedData = prof["encodedProfile"] as? Data {
-                        return encodedData
-                    } else if let b64Str = prof["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64Str) {
-                        return decoded
-                    }
+            onLog?(LogMessage(level: .info, message: "[Portal] Received \(profiles.count) provisioning profile(s) from Xcode API."))
+            let wildcardProf = profiles.first(where: {
+                let name = ($0["name"] as? String) ?? ""
+                let appId = (($0["appId"] as? [String: Any])?["identifier"] as? String) ?? ""
+                return name.contains("*") || appId.contains("*")
+            }) ?? profiles.first
+
+            if let prof = wildcardProf {
+                if let encodedData = prof["encodedProfile"] as? Data {
+                    return encodedData
+                } else if let b64Str = prof["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64Str) {
+                    return decoded
                 }
             }
-        } catch {
-            onLog?(LogMessage(level: .warning, message: "[Portal] Failed to fetch provisioning profiles: \(error.localizedDescription)"))
         }
+
+        // 2. Fallback: Portal Struts listProvisioningProfiles.action
+        onLog?(LogMessage(level: .info, message: "[Portal] Checking provisioning profiles via Developer Portal..."))
+        let listProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/listProvisioningProfiles.action")!
+        let listProfParams = [
+            "teamId": team.id,
+            "pageNumber": "1",
+            "pageSize": "500",
+            "sort": "name=asc"
+        ]
+        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: listProfParams, cookies: cookies, urlSession: urlSession)
+        if let lRes = try? await executePortalRequest(listProfReq, session: urlSession, operationName: "listProvisioningProfiles (Portal)", onLog: onLog),
+           let json = lRes.json,
+           let profiles = json["provisioningProfiles"] as? [[String: Any]], !profiles.isEmpty {
+
+            let activeProfiles = profiles.filter {
+                let status = ($0["status"] as? String) ?? ($0["statusString"] as? String) ?? ""
+                return status.caseInsensitiveCompare("Active") == .orderedSame || status.caseInsensitiveCompare("Issued") == .orderedSame || status.isEmpty
+            }
+
+            let candidate = activeProfiles.first(where: {
+                let name = ($0["name"] as? String) ?? ""
+                return name.contains("*") || name.localizedCaseInsensitiveContains("wildcard")
+            }) ?? activeProfiles.first
+
+            if let chosen = candidate, let pId = (chosen["provisioningProfileId"] as? String) ?? (chosen["id"] as? String), !pId.isEmpty {
+                if let b64 = chosen["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
+                    onLog?(LogMessage(level: .success, message: "[Portal] Retrieved active profile: \(chosen["name"] as? String ?? pId)"))
+                    return decoded
+                }
+
+                let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
+                let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
+                if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent", onLog: onLog),
+                   dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
+                    onLog?(LogMessage(level: .success, message: "[Portal] Downloaded active profile: \(chosen["name"] as? String ?? pId)"))
+                    return dlRes.data
+                }
+            }
+        }
+
         return nil
     }
 

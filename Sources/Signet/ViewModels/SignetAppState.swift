@@ -848,17 +848,38 @@ public final class SignetAppState: ObservableObject {
                 }
             )
 
+            var updatedSession = session
             if updatedCookies.count != cookies.count {
-                var updatedSession = session
                 updatedSession.cookiesData = AppleAuthService.encodeCookies(updatedCookies)
                 self.currentDeveloperSession = updatedSession
                 self.saveAppleDeveloperSession(updatedSession)
             }
 
-            self.refreshPortalDevices()
-            self.refreshPortalCertificates()
-            self.refreshPortalAppIds()
+            // Sequential / coordinated loading to avoid race conditions on session cookies
+            do {
+                let devices = try await self.appleAuthService.fetchPortalDevices(session: updatedSession, team: team, onLog: { log in Task { @MainActor in self.appendLog(log) } })
+                self.portalDevices = devices
+            } catch {
+                self.appendLog(LogMessage(level: .warning, message: "[Portal] Device fetch: \(error.localizedDescription)"))
+            }
+
+            do {
+                let certs = try await self.appleAuthService.fetchPortalCertificates(session: updatedSession, team: team, onLog: { log in Task { @MainActor in self.appendLog(log) } })
+                self.portalCertificates = certs
+            } catch {
+                self.appendLog(LogMessage(level: .warning, message: "[Portal] Certificate fetch: \(error.localizedDescription)"))
+            }
+
+            do {
+                let appIds = try await self.appleAuthService.fetchPortalAppIds(session: updatedSession, team: team, onLog: { log in Task { @MainActor in self.appendLog(log) } })
+                self.portalAppIds = appIds
+            } catch {
+                self.appendLog(LogMessage(level: .warning, message: "[Portal] App ID fetch: \(error.localizedDescription)"))
+            }
+
             self.refreshKeychainIdentities()
+            self.isPortalLoading = false
+            self.portalStatusMessage = "Loaded \(self.portalDevices.count) device(s), \(self.portalCertificates.count) cert(s), \(self.portalAppIds.count) App ID(s)."
         }
     }
 

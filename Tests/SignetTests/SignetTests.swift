@@ -173,4 +173,42 @@ final class SignetTests: XCTestCase {
         XCTAssertEqual(decoded[0].type, "Company/Organization")
         XCTAssertEqual(decoded[1].type, "Company/Organization")
     }
+
+    func testPortalModels() {
+        // Device
+        let device = PortalDevice(id: "D123", name: "iPhone 15 Pro", udid: "00008110-123456", deviceClass: "iphone", model: "A3101", status: "Y")
+        XCTAssertEqual(device.id, "D123")
+        XCTAssertTrue(device.isEnabled)
+        XCTAssertEqual(device.displayClassIcon, "iphone")
+
+        let ipad = PortalDevice(id: "D456", name: "iPad Pro", udid: "00008120-654321", deviceClass: "ipad", status: "Disabled")
+        XCTAssertFalse(ipad.isEnabled)
+        XCTAssertEqual(ipad.displayClassIcon, "ipad")
+
+        // Certificate
+        let cert = PortalCertificate(
+            id: "C789",
+            name: "Signet Development",
+            type: "83Q87W3TGH",
+            typeDisplayName: "Apple Development",
+            status: "Issued",
+            expirationDate: "2027-10-02"
+        )
+        XCTAssertEqual(cert.id, "C789")
+        XCTAssertTrue(cert.isIssued)
+
+        // App ID
+        let wildcardAppId = PortalAppId(id: "A111", name: "Signet Wildcard", identifier: "*", prefix: "ABC1234XYZ")
+        XCTAssertTrue(wildcardAppId.isWildcard)
+
+        let explicitAppId = PortalAppId(id: "A222", name: "App Explicit", identifier: "com.example.app", prefix: "ABC1234XYZ")
+        XCTAssertFalse(explicitAppId.isWildcard)
+    }
+
+    func testHomebrewResolution() {
+        let brewAvailable = BinaryManager.shared.isBrewAvailable
+        if brewAvailable {
+            XCTAssertNotNil(BinaryManager.shared.resolveBrew())
+        }
+    }
 }

@@ -6,14 +6,37 @@ public struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     public enum SettingsTab: String, CaseIterable, Identifiable {
-        case appleID = "Apple ID (Direct + 2FA)"
+        case appleID = "Apple ID"
+        case portalManager = "Portal Manager"
         case apiKey = "API Key (.p8)"
-        case manualFiles = "Manual (.p12 / Profile)"
+        case manualFiles = "Manual (.p12)"
         case engines = "CLI Engines"
         public var id: String { rawValue }
     }
 
-    @State private var selectedTab: SettingsTab = .appleID
+    public enum PortalSubTab: String, CaseIterable, Identifiable {
+        case devices = "Devices (UDID)"
+        case certificates = "Certificates"
+        case appIds = "Bundle IDs (App IDs)"
+        public var id: String { rawValue }
+    }
+
+    @State var selectedTab: SettingsTab = .appleID
+    @State var selectedPortalSubTab: PortalSubTab = .devices
+
+    // Portal Manager Form State
+    @State var showAddDeviceSheet: Bool = false
+    @State var newDeviceName: String = ""
+    @State var newDeviceUDID: String = ""
+    @State var newDeviceClass: String = "iphone"
+
+    @State var showAddAppIdSheet: Bool = false
+    @State var newAppIdName: String = ""
+    @State var newAppIdIdentifier: String = "*"
+
+    @State var devicePendingDeletion: PortalDevice? = nil
+    @State var certPendingRevocation: PortalCertificate? = nil
+    @State var appIdPendingDeletion: PortalAppId? = nil
 
     // Manual state
     @State private var selectedP12URL: URL?
@@ -111,6 +134,8 @@ public struct SettingsView: View {
                     switch selectedTab {
                     case .appleID:
                         appleIDSection()
+                    case .portalManager:
+                        portalManagerSection()
                     case .apiKey:
                         apiKeySection()
                     case .manualFiles:
@@ -122,9 +147,15 @@ public struct SettingsView: View {
                 .padding(20)
             }
         }
-        .frame(width: 640, height: 680)
+        .frame(width: 720, height: 720)
         .sheet(isPresented: $appState.showAppleWebLoginSheet) {
             AppleIDWebLoginView(appState: appState)
+        }
+        .sheet(isPresented: $showAddDeviceSheet) {
+            registerDeviceModalView()
+        }
+        .sheet(isPresented: $showAddAppIdSheet) {
+            registerAppIdModalView()
         }
         .onChange(of: selectedTab) {
             appState.clearSettingsError()
@@ -389,6 +420,32 @@ public struct SettingsView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.accentColor)
                 }
+
+                Toggle(isOn: $appState.autoRevokeOldCertsOnLimit) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto-revoke oldest certificate if team limit is reached")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("Apple limits active Development Certificates. Enabling this automatically frees a slot to issue a fresh keypair (matching Sideloadly behavior).")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.checkbox)
+                .padding(.top, 4)
+            }
+            .padding(.top, 4)
+
+            // Portal Manager Shortcut
+            HStack {
+                Text("Need to view/remove UDIDs, certificates or App IDs?")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Open Portal Manager →") {
+                    selectedTab = .portalManager
+                }
+                .buttonStyle(.link)
+                .font(.system(size: 11, weight: .semibold))
             }
             .padding(.top, 4)
         }
@@ -776,9 +833,23 @@ public struct SettingsView: View {
 
     @ViewBuilder
     private func cliToolsSection() -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("CLI Engines & Binary Status", systemImage: "gearshape.2.fill")
-                .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("CLI Engines & Binary Status", systemImage: "gearshape.2.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button {
+                    self.statusReport = appState.binaryManager.getStatusReport()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Refresh Status")
+                    }
+                    .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
 
             VStack(spacing: 8) {
                 ForEach(statusReport, id: \.name) { item in
@@ -799,14 +870,73 @@ public struct SettingsView: View {
 
                         Spacer()
 
-                        Text(item.isAvailable ? (item.version ?? "Available") : "Missing")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(item.isAvailable ? Color.green : Color.secondary)
+                        if item.isAvailable {
+                            Text(item.version ?? "Available")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.green)
+                        } else {
+                            if let pkg = packageForBinary(item.name), appState.binaryManager.isBrewAvailable {
+                                Button {
+                                    appState.installCliPackage(packageName: pkg) {
+                                        self.statusReport = appState.binaryManager.getStatusReport()
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        if appState.isInstallingEngine {
+                                            ProgressView().controlSize(.mini)
+                                        } else {
+                                            Image(systemName: "arrow.down.circle.fill")
+                                        }
+                                        Text("Install (\(pkg))")
+                                    }
+                                    .font(.system(size: 10, weight: .semibold))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(appState.isInstallingEngine)
+                            } else {
+                                Text("Missing")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color.secondary)
+                            }
+                        }
                     }
                     .padding(8)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
+            }
+
+            if appState.isInstallingEngine || !appState.engineInstallLog.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Homebrew Installation Output")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                        if appState.isInstallingEngine {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Button("Clear") {
+                                appState.engineInstallLog = ""
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10))
+                        }
+                    }
+
+                    ScrollView {
+                        Text(appState.engineInstallLog)
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(height: 100)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
             HStack {
@@ -825,6 +955,20 @@ public struct SettingsView: View {
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func packageForBinary(_ name: String) -> String? {
+        let lower = name.lowercased()
+        if lower.contains("ideviceinstaller") {
+            return "ideviceinstaller"
+        }
+        if lower.contains("idevice_id") || lower.contains("ideviceinfo") {
+            return "libimobiledevice"
+        }
+        if lower.contains("zsign") {
+            return "zsign"
+        }
+        return nil
     }
 
     // MARK: - File Browsers

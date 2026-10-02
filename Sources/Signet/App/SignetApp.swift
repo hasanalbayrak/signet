@@ -5,6 +5,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+
+        // Set application icon from bundled resources
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
+            if let image = NSImage(contentsOf: iconURL) {
+                NSApplication.shared.applicationIconImage = image
+            }
+        }
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

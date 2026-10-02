@@ -412,6 +412,7 @@ public final class AppleAuthService: @unchecked Sendable {
         session: AppleDeveloperSession,
         team: DeveloperTeam,
         targetDevice: Device?,
+        autoRevokeIfLimitReached: Bool = true,
         onStep: (@Sendable (AutoProvisioningStep) -> Void)? = nil,
         onLog: (@Sendable (LogMessage) -> Void)? = nil
     ) async throws -> (cert: CertificateInfo, profile: ProvisioningProfileInfo) {
@@ -464,6 +465,7 @@ public final class AppleAuthService: @unchecked Sendable {
             urlSession: urlSession,
             team: team,
             cookies: cookieList,
+            autoRevokeIfLimitReached: autoRevokeIfLimitReached,
             onLog: onLog
         )
 
@@ -586,6 +588,7 @@ public final class AppleAuthService: @unchecked Sendable {
         urlSession: URLSession,
         team: DeveloperTeam,
         cookies: [HTTPCookie],
+        autoRevokeIfLimitReached: Bool = true,
         onLog: (@Sendable (LogMessage) -> Void)?
     ) async throws -> CertPackage {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -668,7 +671,8 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // If creation failed or limit reached, search for existing active certificates in the team
         if rawCerData == nil {
-            onLog?(LogMessage(level: .info, message: "Checking for existing certificates in team '\(team.name)'..."))
+            onLog?(LogMessage(level: .info, message: "Checking certificates in team '\(team.name)' (\(lastErrorMessage.isEmpty ? "No certificate returned" : lastErrorMessage))..."))
+
             let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
             let listParams = [
                 "teamId": team.id,
@@ -689,24 +693,69 @@ public final class AppleAuthService: @unchecked Sendable {
                     ($0["canDownload"] as? Bool) == true
                 }
 
-                if let existing = activeCerts.first,
-                   let existingId = existing["certificateId"] as? String {
-                    let existingType = (existing["certificateTypeDisplayId"] as? String) ?? "83Q87W3TGH"
-                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(existingId)&type=\(existingType)")!
-                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                if autoRevokeIfLimitReached && !activeCerts.isEmpty {
+                    // Sideloadly behavior: prioritize revoking previous Signet cert or oldest dev cert
+                    let candidate = activeCerts.first(where: {
+                        (($0["name"] as? String) ?? "").localizedCaseInsensitiveContains("Signet")
+                    }) ?? activeCerts.last!
 
-                    if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
-                       let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
-                        certId = existingId
-                        rawCerData = dlData
-                        onLog?(LogMessage(level: .info, message: "Retrieved existing certificate from Apple (ID: \(existingId))."))
+                    let candId = (candidate["certificateId"] as? String) ?? (candidate["certRequestId"] as? String) ?? ""
+                    let candType = (candidate["certificateTypeDisplayId"] as? String) ?? "83Q87W3TGH"
+                    let candName = (candidate["name"] as? String) ?? "Apple Development"
+
+                    onLog?(LogMessage(level: .warning, message: "Team certificate limit reached on Apple Developer Portal. Automatically revoking '\(candName)' (ID: \(candId)) to make room for Signet keypair (matching Sideloadly behavior)..."))
+
+                    let revoked = (try? await revokePortalCertificate(urlSession: urlSession, team: team, certificateId: candId, type: candType, cookies: cookies)) ?? false
+                    if revoked {
+                        onLog?(LogMessage(level: .success, message: "Revocation complete. Requesting fresh certificate with new keypair..."))
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+                        for certType in certTypes {
+                            let submitURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/submitCertificateRequest.action")!
+                            let params = [
+                                "teamId": team.id,
+                                "type": certType,
+                                "csrContent": csrContent
+                            ]
+                            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies)
+
+                            if let (rData, rResp) = try? await urlSession.data(for: req),
+                               let rHttp = rResp as? HTTPURLResponse, rHttp.statusCode == 200,
+                               let rJson = try? JSONSerialization.jsonObject(with: rData) as? [String: Any] {
+
+                                if let certReq = rJson["certRequest"] as? [String: Any] {
+                                    let id = (certReq["certificateId"] as? String) ??
+                                             ((certReq["certificate"] as? [String: Any])?["certificateId"] as? String) ?? ""
+                                    if !id.isEmpty { certId = id }
+
+                                    if let contentStr = (certReq["certContent"] as? String) ??
+                                                        ((certReq["certificate"] as? [String: Any])?["certContent"] as? String) {
+                                        rawCerData = contentStr.data(using: .utf8) ?? Data(base64Encoded: contentStr)
+                                    }
+                                }
+
+                                if !certId.isEmpty && rawCerData == nil {
+                                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certId)&type=\(certType)")!
+                                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                                    if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
+                                       let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
+                                        rawCerData = dlData
+                                    }
+                                }
+
+                                if rawCerData != nil {
+                                    onLog?(LogMessage(level: .success, message: "Fresh Development certificate issued: ID \(certId)"))
+                                    break
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
         guard let cerBytes = rawCerData, !cerBytes.isEmpty else {
-            let detail = lastErrorMessage.isEmpty ? "Could not obtain certificate content from Apple." : lastErrorMessage
+            let detail = lastErrorMessage.isEmpty ? "Could not obtain matching certificate from Apple. If your team's limit was reached, use the Portal Manager tab to revoke an unused certificate." : lastErrorMessage
             throw AppleDeveloperError.certificateCreationFailed(detail)
         }
 
@@ -720,7 +769,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         let p12Success = runOpenssl(["pkcs12", "-export", "-out", p12Path, "-inkey", keyPath, "-in", certPemPath, "-password", "pass:\(password)"])
         guard p12Success, FileManager.default.fileExists(atPath: p12Path) else {
-            throw AppleDeveloperError.certificateCreationFailed("Failed to package certificate and private key into PKCS#12 (.p12). If your team's certificate limit was reached, revoke an unused certificate on developer.apple.com so Signet can generate a fresh matching keypair.")
+            throw AppleDeveloperError.certificateCreationFailed("Failed to package certificate and private key into PKCS#12 (.p12). If your team's certificate limit was reached, revoke an unused certificate on developer.apple.com or in Portal Manager.")
         }
 
         let p12Data = try Data(contentsOf: URL(fileURLWithPath: p12Path))
@@ -873,5 +922,350 @@ public final class AppleAuthService: @unchecked Sendable {
         try? p.run()
         p.waitUntilExit()
         return p.terminationStatus == 0
+    }
+
+    // MARK: - Portal Management APIs
+
+    public func makeSession(from session: AppleDeveloperSession) -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieAcceptPolicy = .always
+        config.httpShouldSetCookies = true
+        let urlSession = URLSession(configuration: config)
+        for c in extractCookies(from: session) {
+            config.httpCookieStorage?.setCookie(c)
+        }
+        return urlSession
+    }
+
+    public func extractCookies(from session: AppleDeveloperSession) -> [HTTPCookie] {
+        guard let data = session.cookiesData,
+              let cookies = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, HTTPCookie.self], from: data) as? [HTTPCookie] else {
+            return []
+        }
+        return cookies
+    }
+
+    // Devices
+    public func fetchPortalDevices(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam
+    ) async throws -> [PortalDevice] {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let devices = json["devices"] as? [[String: Any]] else {
+            return []
+        }
+
+        var result: [PortalDevice] = []
+        for d in devices {
+            let id = (d["deviceId"] as? String) ?? (d["id"] as? String) ?? ""
+            let name = (d["name"] as? String) ?? "Unnamed Device"
+            let udid = (d["deviceNumber"] as? String) ?? ""
+            let dClass = (d["deviceClass"] as? String) ?? "iphone"
+            let model = d["model"] as? String
+            let status = (d["status"] as? String) ?? "Y"
+            if !id.isEmpty && !udid.isEmpty {
+                result.append(PortalDevice(id: id, name: name, udid: udid, deviceClass: dClass, model: model, status: status))
+            }
+        }
+        return result
+    }
+
+    public func deletePortalDevice(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        deviceId: String
+    ) async throws -> Bool {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let deleteURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/deleteDevice.action")!
+        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies)
+
+        if let (data, response) = try? await urlSession.data(for: req),
+           let http = response as? HTTPURLResponse, http.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let code = json["resultCode"] as? Int, code == 0 {
+            return true
+        }
+
+        let disableURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/disableDevice.action")!
+        let disableReq = makePortalRequest(url: disableURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies)
+        if let (data, response) = try? await urlSession.data(for: disableReq),
+           let http = response as? HTTPURLResponse, http.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let code = json["resultCode"] as? Int, code == 0 {
+            return true
+        }
+
+        return false
+    }
+
+    public func registerPortalDeviceManual(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        name: String,
+        udid: String,
+        deviceClass: String = "iphone"
+    ) async throws -> PortalDevice {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let addURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/addDevices.action")!
+        let params: [String: String] = [
+            "teamId": team.id,
+            "deviceClasses": deviceClass,
+            "deviceNumbers": udid,
+            "deviceNames": name,
+            "register": "single"
+        ]
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppleDeveloperError.apiError("Failed to register device with Apple Developer Portal.")
+        }
+
+        if let devices = json["devices"] as? [[String: Any]], let first = devices.first,
+           let id = (first["deviceId"] as? String) ?? (first["id"] as? String) {
+            return PortalDevice(id: id, name: name, udid: udid, deviceClass: deviceClass, model: first["model"] as? String, status: "Y")
+        }
+
+        if let userStr = json["userString"] as? String {
+            throw AppleDeveloperError.apiError(userStr)
+        }
+
+        throw AppleDeveloperError.apiError("Could not register device in team.")
+    }
+
+    // Certificates
+    public func fetchPortalCertificates(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam
+    ) async throws -> [PortalCertificate] {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
+        let params = [
+            "teamId": team.id,
+            "types": "83Q87W3TGH,5QPB9NHCEI,R851327ND5,99Q9982463",
+            "pageNumber": "1",
+            "pageSize": "500",
+            "sort": "certRequestStatusCode=asc"
+        ]
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: params, cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let certs = json["certRequests"] as? [[String: Any]] else {
+            return []
+        }
+
+        var result: [PortalCertificate] = []
+        for c in certs {
+            let id = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
+            let name = (c["name"] as? String) ?? (c["ownerName"] as? String) ?? "Apple Development"
+            let type = (c["certificateTypeDisplayId"] as? String) ?? (c["type"] as? String) ?? "83Q87W3TGH"
+            let typeDisplayName = (c["typeDisplayName"] as? String) ?? "Apple Development"
+            let status = (c["statusString"] as? String) ?? "Issued"
+            let exp = c["expirationDate"] as? String
+            let canDl = (c["canDownload"] as? Bool) ?? true
+            let canRev = (c["canRevoke"] as? Bool) ?? true
+            let owner = c["ownerName"] as? String
+            if !id.isEmpty {
+                result.append(PortalCertificate(
+                    id: id,
+                    name: name,
+                    type: type,
+                    typeDisplayName: typeDisplayName,
+                    status: status,
+                    expirationDate: exp,
+                    canDownload: canDl,
+                    canRevoke: canRev,
+                    ownerName: owner
+                ))
+            }
+        }
+        return result
+    }
+
+    public func revokePortalCertificate(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        certificateId: String,
+        type: String
+    ) async throws -> Bool {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        return try await revokePortalCertificate(urlSession: urlSession, team: team, certificateId: certificateId, type: type, cookies: cookies)
+    }
+
+    public func revokePortalCertificate(
+        urlSession: URLSession,
+        team: DeveloperTeam,
+        certificateId: String,
+        type: String,
+        cookies: [HTTPCookie]
+    ) async throws -> Bool {
+        let revokeURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/revokeCertificate.action")!
+        let params = [
+            "teamId": team.id,
+            "certificateId": certificateId,
+            "type": type
+        ]
+        let req = makePortalRequest(url: revokeURL, method: "POST", bodyParams: params, cookies: cookies)
+        guard let (data, response) = try? await urlSession.data(for: req),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        let code = (json["resultCode"] as? Int) ?? -1
+        return code == 0
+    }
+
+    public func downloadPortalCertificate(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        certificateId: String,
+        type: String
+    ) async throws -> Data {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certificateId)&type=\(type)")!
+        let req = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty else {
+            throw AppleDeveloperError.apiError("Failed to download certificate from Apple Developer Portal.")
+        }
+        return data
+    }
+
+    // App IDs
+    public func fetchPortalAppIds(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam
+    ) async throws -> [PortalAppId] {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/listAppIds.action")!
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let appIds = json["appIds"] as? [[String: Any]] else {
+            return []
+        }
+
+        var result: [PortalAppId] = []
+        for a in appIds {
+            let id = (a["appIdId"] as? String) ?? ""
+            let name = (a["name"] as? String) ?? "Unnamed App ID"
+            let identifier = (a["identifier"] as? String) ?? ""
+            let prefix = (a["prefix"] as? String) ?? team.id
+            let isWildcard = (a["isWildcard"] as? Bool) ?? (identifier.contains("*"))
+            if !id.isEmpty && !identifier.isEmpty {
+                result.append(PortalAppId(id: id, name: name, identifier: identifier, prefix: prefix, isWildcard: isWildcard))
+            }
+        }
+        return result
+    }
+
+    public func deletePortalAppId(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        appIdId: String
+    ) async throws -> Bool {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let deleteURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/deleteAppId.action")!
+        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "appIdId": appIdId], cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = json["resultCode"] as? Int else {
+            return false
+        }
+        return code == 0
+    }
+
+    public func createPortalAppId(
+        session: AppleDeveloperSession,
+        team: DeveloperTeam,
+        name: String,
+        identifier: String
+    ) async throws -> PortalAppId {
+        let urlSession = makeSession(from: session)
+        let cookies = extractCookies(from: session)
+        let addURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/addAppId.action")!
+        let type = identifier.contains("*") ? "wildcard" : "explicit"
+        let params = [
+            "teamId": team.id,
+            "name": name,
+            "identifier": identifier,
+            "type": type
+        ]
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppleDeveloperError.apiError("Failed to register App ID.")
+        }
+
+        if let appId = json["appId"] as? [String: Any],
+           let id = appId["appIdId"] as? String {
+            return PortalAppId(id: id, name: name, identifier: identifier, prefix: team.id, isWildcard: identifier.contains("*"))
+        }
+
+        if let userStr = json["userString"] as? String {
+            throw AppleDeveloperError.apiError(userStr)
+        }
+
+        throw AppleDeveloperError.apiError("Could not create App ID in team.")
+    }
+
+    // Keychain
+    public func findLocalKeychainIdentities() -> [KeychainIdentity] {
+        let task = Process()
+        task.launchPath = "/usr/bin/security"
+        task.arguments = ["find-identity", "-p", "codesigning", "-v"]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return [] }
+
+            var identities: [KeychainIdentity] = []
+            let lines = output.components(separatedBy: .newlines)
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard let quoteStart = trimmed.firstIndex(of: "\""),
+                      let quoteEnd = trimmed.lastIndex(of: "\""),
+                      quoteStart < quoteEnd else { continue }
+
+                let name = String(trimmed[trimmed.index(after: quoteStart)..<quoteEnd])
+                let prefix = trimmed[..<quoteStart].trimmingCharacters(in: .whitespaces)
+                let parts = prefix.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                let fingerprint = parts.count >= 2 ? parts[1] : (parts.first ?? "")
+
+                var teamId: String? = nil
+                if let openParen = name.lastIndex(of: "("), let closeParen = name.lastIndex(of: ")"), openParen < closeParen {
+                    teamId = String(name[name.index(after: openParen)..<closeParen])
+                }
+
+                identities.append(KeychainIdentity(id: fingerprint, name: name, teamId: teamId))
+            }
+            return identities
+        } catch {
+            return []
+        }
     }
 }

@@ -33,7 +33,13 @@ if [ -f "$ZSIGN_SRC" ]; then
     chmod +x "$APP_DIR/Contents/Resources/bin/zsign"
 fi
 
-# 3. Write Info.plist
+# 3. Copy AppIcon
+ICON_SRC="$PROJECT_ROOT/Sources/Signet/Resources/AppIcon.icns"
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
+# 4. Write Info.plist
 cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,6 +53,8 @@ cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
     <string>Signet</string>
     <key>CFBundleDisplayName</key>
     <string>Signet</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -5,10 +5,15 @@ public enum AppleDeveloperError: LocalizedError {
     case invalidPrivateKey(String)
     case authenticationFailed(String)
     case apiError(statusCode: Int, message: String)
+    case portalError(String)
     case deviceRegistrationFailed(String)
     case certificateCreationFailed(String)
     case profileCreationFailed(String)
     case opensslExecutionFailed(String)
+
+    public static func apiError(_ message: String) -> AppleDeveloperError {
+        return .portalError(message)
+    }
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +23,8 @@ public enum AppleDeveloperError: LocalizedError {
             return "Apple Developer authentication failed: \(msg)"
         case .apiError(let code, let msg):
             return "Apple API error (\(code)): \(msg)"
+        case .portalError(let msg):
+            return msg
         case .deviceRegistrationFailed(let msg):
             return "Could not register device with Apple: \(msg)"
         case .certificateCreationFailed(let msg):

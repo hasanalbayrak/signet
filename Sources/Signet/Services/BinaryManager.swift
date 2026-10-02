@@ -170,6 +170,58 @@ public final class BinaryManager: @unchecked Sendable {
         return report
     }
 
+    // MARK: - Homebrew Engine Installation
+
+    public func resolveBrew() -> String? {
+        let brewPaths = [
+            "/opt/homebrew/bin/brew",
+            "/usr/local/bin/brew"
+        ]
+        for path in brewPaths {
+            if isExecutable(at: path) {
+                return path
+            }
+        }
+        return findInPath(binaryName: "brew")
+    }
+
+    public var isBrewAvailable: Bool {
+        return resolveBrew() != nil
+    }
+
+    public func installPackage(_ packageName: String, onOutput: @escaping @Sendable (String) -> Void) async throws -> Bool {
+        guard let brew = resolveBrew() else {
+            throw NSError(domain: "BinaryManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Homebrew is not installed on this system."])
+        }
+
+        let task = Process()
+        task.launchPath = brew
+        task.arguments = ["install", packageName]
+
+        var env = ProcessInfo.processInfo.environment
+        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+        task.environment = env
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        let fileHandle = pipe.fileHandleForReading
+        fileHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let line = String(data: data, encoding: .utf8), !line.isEmpty {
+                onOutput(line)
+            }
+        }
+
+        try task.run()
+        task.waitUntilExit()
+        fileHandle.readabilityHandler = nil
+
+        return task.terminationStatus == 0
+    }
+
     // MARK: - Helpers
 
     public func isExecutable(at path: String) -> Bool {
@@ -208,3 +260,4 @@ public final class BinaryManager: @unchecked Sendable {
         return nil
     }
 }
+

@@ -54,6 +54,19 @@ public final class SignetAppState: ObservableObject {
     @Published public var showAppleWebLoginSheet: Bool = false
     @Published public var settingsInlineErrorMessage: String? = nil
 
+    // Portal Management
+    @Published public var portalDevices: [PortalDevice] = []
+    @Published public var portalCertificates: [PortalCertificate] = []
+    @Published public var portalAppIds: [PortalAppId] = []
+    @Published public var keychainIdentities: [KeychainIdentity] = []
+    @Published public var isPortalLoading: Bool = false
+    @Published public var portalStatusMessage: String? = nil
+    @Published public var autoRevokeOldCertsOnLimit: Bool = true
+
+    // CLI Engine Management
+    @Published public var isInstallingEngine: Bool = false
+    @Published public var engineInstallLog: String = ""
+
     // MARK: - Dependencies
     private let credentialService = CredentialService.shared
     private let deviceService = DeviceService.shared
@@ -415,14 +428,15 @@ public final class SignetAppState: ObservableObject {
 
     public func startAutoProvisioningWithAppleID() {
         guard let session = currentDeveloperSession else {
-            showError("Please sign in with your Apple ID first.")
+            showSettingsError("Please sign in with your Apple ID first.")
             return
         }
         guard let team = selectedTeam else {
-            showError("Please select an Apple Developer Team.")
+            showSettingsError("Please select an Apple Developer Team.")
             return
         }
 
+        settingsInlineErrorMessage = nil
         appendLog(LogMessage(level: .info, message: "⚡ Starting 1-Click Apple ID Auto-Provisioning for \(team.name)..."))
 
         Task { [weak self] in
@@ -432,6 +446,7 @@ public final class SignetAppState: ObservableObject {
                     session: session,
                     team: team,
                     targetDevice: self.selectedDevice,
+                    autoRevokeIfLimitReached: self.autoRevokeOldCertsOnLimit,
                     onStep: { [weak self] step in
                         Task { @MainActor in
                             self?.autoProvisioningStep = step
@@ -453,7 +468,7 @@ public final class SignetAppState: ObservableObject {
                 self.appendLog(LogMessage(level: .success, message: "✨ Auto-Provisioning Successful! App is ready to sign."))
             } catch {
                 self.autoProvisioningStep = .failed(error: error.localizedDescription)
-                self.showError("Auto-provisioning failed: \(error.localizedDescription)")
+                self.showSettingsError("Auto-provisioning failed: \(error.localizedDescription)")
                 self.appendLog(LogMessage(level: .error, message: "Auto-provisioning failed: \(error.localizedDescription)"))
             }
         }
@@ -737,5 +752,217 @@ public final class SignetAppState: ObservableObject {
 
     public func clearSettingsError() {
         self.settingsInlineErrorMessage = nil
+    }
+
+    // MARK: - Portal Management Operations
+
+    public func loadPortalData() {
+        refreshPortalDevices()
+        refreshPortalCertificates()
+        refreshPortalAppIds()
+        refreshKeychainIdentities()
+    }
+
+    public func refreshPortalDevices() {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let devices = try await self.appleAuthService.fetchPortalDevices(session: session, team: team)
+                self.portalDevices = devices
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to fetch devices: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func deletePortalDevice(id: String) {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let success = try await self.appleAuthService.deletePortalDevice(session: session, team: team, deviceId: id)
+                if success {
+                    self.portalDevices.removeAll { $0.id == id }
+                    self.portalStatusMessage = "Device removed successfully."
+                } else {
+                    self.showSettingsError("Could not remove device. Apple Developer Portal may restrict removing active devices.")
+                }
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to delete device: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func registerPortalDevice(name: String, udid: String, deviceClass: String = "iphone") {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let dev = try await self.appleAuthService.registerPortalDeviceManual(
+                    session: session,
+                    team: team,
+                    name: name,
+                    udid: udid,
+                    deviceClass: deviceClass
+                )
+                self.portalDevices.append(dev)
+                self.portalStatusMessage = "Registered device: \(name)"
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to register device: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func refreshPortalCertificates() {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let certs = try await self.appleAuthService.fetchPortalCertificates(session: session, team: team)
+                self.portalCertificates = certs
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to fetch certificates: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func revokePortalCertificate(id: String, type: String) {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let success = try await self.appleAuthService.revokePortalCertificate(session: session, team: team, certificateId: id, type: type)
+                if success {
+                    self.portalCertificates.removeAll { $0.id == id }
+                    self.portalStatusMessage = "Certificate revoked successfully."
+                } else {
+                    self.showSettingsError("Could not revoke certificate.")
+                }
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to revoke certificate: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func downloadPortalCertificate(id: String, type: String, destinationURL: URL) {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let data = try await self.appleAuthService.downloadPortalCertificate(session: session, team: team, certificateId: id, type: type)
+                try data.write(to: destinationURL)
+                self.portalStatusMessage = "Certificate downloaded to: \(destinationURL.lastPathComponent)"
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to download certificate: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func refreshPortalAppIds() {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let appIds = try await self.appleAuthService.fetchPortalAppIds(session: session, team: team)
+                self.portalAppIds = appIds
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to fetch App IDs: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func deletePortalAppId(id: String) {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let success = try await self.appleAuthService.deletePortalAppId(session: session, team: team, appIdId: id)
+                if success {
+                    self.portalAppIds.removeAll { $0.id == id }
+                    self.portalStatusMessage = "App ID deleted successfully."
+                } else {
+                    self.showSettingsError("Could not delete App ID.")
+                }
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to delete App ID: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func createPortalAppId(name: String, identifier: String) {
+        guard let session = currentDeveloperSession, let team = selectedTeam else { return }
+        isPortalLoading = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let appId = try await self.appleAuthService.createPortalAppId(session: session, team: team, name: name, identifier: identifier)
+                self.portalAppIds.append(appId)
+                self.portalStatusMessage = "Created App ID '\(identifier)'"
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.showSettingsError("Failed to create App ID: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func refreshKeychainIdentities() {
+        self.keychainIdentities = appleAuthService.findLocalKeychainIdentities()
+    }
+
+    // MARK: - CLI Engine Homebrew Installation
+
+    public func installCliPackage(packageName: String, onFinished: @escaping () -> Void) {
+        guard !isInstallingEngine else { return }
+        isInstallingEngine = true
+        engineInstallLog = "Starting installation of \(packageName) via Homebrew...\n"
+        appendLog(LogMessage(level: .info, message: "Installing CLI engine '\(packageName)' via Homebrew..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let success = try await self.binaryManager.installPackage(packageName) { [weak self] line in
+                    Task { @MainActor in
+                        self?.engineInstallLog.append(line)
+                    }
+                }
+                self.isInstallingEngine = false
+                if success {
+                    self.appendLog(LogMessage(level: .success, message: "Successfully installed \(packageName)!"))
+                    onFinished()
+                } else {
+                    self.appendLog(LogMessage(level: .error, message: "Homebrew failed to install \(packageName)."))
+                }
+            } catch {
+                self.isInstallingEngine = false
+                self.engineInstallLog.append("\nError: \(error.localizedDescription)\n")
+                self.appendLog(LogMessage(level: .error, message: "Installation error: \(error.localizedDescription)"))
+            }
+        }
     }
 }

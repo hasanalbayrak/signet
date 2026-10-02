@@ -1429,34 +1429,12 @@ public final class AppleAuthService: @unchecked Sendable {
         let targetIosTypes: [(code: String, label: String)] = [
             ("WXV89964HE", "Apple Distribution"),
             ("R58UK2EWSO", "iOS Distribution"),
-            ("R5DG2F3R6A", "iOS Distribution (Classic)"),
             ("9RQEK7MSXA", "iOS In-House Distribution"),
             ("83Q87W3TGH", "Apple Development"),
-            ("5QPB9NHCEI", "iOS Development"),
-            ("5QPB9NHCEQ", "iOS Development (Extended)")
+            ("5QPB9NHCEI", "iOS Development")
         ]
 
         let iosListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
-
-        // 2a. Try listing all certificates without types filter first
-        let allParams = [
-            "teamId": team.id,
-            "pageNumber": "1",
-            "pageSize": "500",
-            "sort": "certRequestStatusCode=asc"
-        ]
-        let allReq = makePortalRequest(url: iosListURL, method: "POST", bodyParams: allParams, cookies: cookies, urlSession: urlSession)
-        if let res = try? await executePortalRequest(allReq, session: urlSession, operationName: "ios/listCertRequests.action (all)", onLog: onLog),
-           res.response.statusCode == 200, let dict = res.json,
-           let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
-            for c in certs {
-                let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
-                if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
-                    legacyRawCerts.append(c)
-                }
-            }
-            onLog?(LogMessage(level: .info, message: "[Portal] iOS cert endpoint (all) returned \(certs.count) certificate(s)."))
-        }
 
         // 2b. Query each specific iOS & Universal certificate type individually
         for item in targetIosTypes {
@@ -1541,27 +1519,6 @@ public final class AppleAuthService: @unchecked Sendable {
             }
             if added > 0 {
                 onLog?(LogMessage(level: .info, message: "[Portal] Xcode development endpoint returned \(added) certificate(s)."))
-            }
-        }
-
-        // 4b. Xcode distribution cert requests
-        for item in targetIosTypes.filter({ $0.label.contains("Distribution") }) {
-            let xcListURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listCertRequests.action")!
-            let xcListReq = makeXcodePlistRequest(url: xcListURL, params: ["teamId": team.id, "types": item.code], cookies: cookies)
-            if let resList = try? await executePortalRequest(xcListReq, session: urlSession, operationName: "developerservices2/listCertRequests.action (\(item.label))", onLog: onLog),
-               resList.response.statusCode == 200, let dictList = resList.json,
-               let certsList = (dictList["certRequests"] as? [[String: Any]]) ?? (dictList["certificates"] as? [[String: Any]]), !certsList.isEmpty {
-                var added = 0
-                for c in certsList {
-                    let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
-                    if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
-                        legacyRawCerts.append(c)
-                        added += 1
-                    }
-                }
-                if added > 0 {
-                    onLog?(LogMessage(level: .info, message: "[Portal] Xcode services returned \(added) \(item.label) certificate(s)."))
-                }
             }
         }
 

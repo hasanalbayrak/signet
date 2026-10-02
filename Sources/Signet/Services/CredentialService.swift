@@ -110,14 +110,34 @@ public final class CredentialService: @unchecked Sendable {
 
     public func importAndSaveP12(from sourceURL: URL, password: String) throws -> CertificateInfo {
         let p12Data = try Data(contentsOf: sourceURL)
-        let info = try parseP12(data: p12Data, password: password, path: sourceURL.path)
+        let dest = savedP12URL
+        let info = try parseP12(data: p12Data, password: password, path: dest.path)
 
         // Save copy to local app credentials
+        if sourceURL.standardizedFileURL != dest.standardizedFileURL {
+            if fileManager.fileExists(atPath: dest.path) {
+                try? fileManager.removeItem(at: dest)
+            }
+            try fileManager.copyItem(at: sourceURL, to: dest)
+        }
+
+        // Save password in Keychain
+        try savePasswordToKeychain(password)
+
+        // Persist path
+        UserDefaults.standard.set(dest.path, forKey: "saved_p12_path")
+
+        return info
+    }
+
+    public func importAndSaveP12Data(_ p12Data: Data, password: String) throws -> CertificateInfo {
         let dest = savedP12URL
+        let info = try parseP12(data: p12Data, password: password, path: dest.path)
+
         if fileManager.fileExists(atPath: dest.path) {
             try? fileManager.removeItem(at: dest)
         }
-        try fileManager.copyItem(at: sourceURL, to: dest)
+        try p12Data.write(to: dest)
 
         // Save password in Keychain
         try savePasswordToKeychain(password)
@@ -225,6 +245,105 @@ public final class CredentialService: @unchecked Sendable {
         }
     }
 
+    private func parseCertificateInfoWithOpenSSL(data: Data, password: String, p12Path: String?) -> CertificateInfo? {
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDir) }
+
+        let inP12 = tempDir.appendingPathComponent("input.p12")
+        let pemPath = tempDir.appendingPathComponent("temp.pem")
+
+        do {
+            try data.write(to: inP12)
+
+            for binURL in availableOpenSSLURLs {
+                let isOpenSSL3 = binURL.path.contains("homebrew") || binURL.path.contains("local")
+
+                var extractAttempts: [[String]] = []
+                if isOpenSSL3 {
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-legacy", "-out", pemPath.path])
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path])
+                } else {
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path])
+                }
+
+                var extracted = false
+                for args in extractAttempts {
+                    let proc = Process()
+                    proc.executableURL = binURL
+                    proc.arguments = args
+                    let pipe = Pipe()
+                    proc.standardError = pipe
+                    proc.standardOutput = pipe
+                    try? proc.run()
+                    proc.waitUntilExit()
+                    if proc.terminationStatus == 0 && fileManager.fileExists(atPath: pemPath.path) {
+                        extracted = true
+                        break
+                    }
+                }
+
+                guard extracted else { continue }
+
+                // Parse cert info using `openssl x509 -in pemPath -noout -subject -dates`
+                let x509Proc = Process()
+                x509Proc.executableURL = binURL
+                x509Proc.arguments = ["x509", "-in", pemPath.path, "-noout", "-subject", "-dates"]
+                let x509Pipe = Pipe()
+                x509Proc.standardOutput = x509Pipe
+                x509Proc.standardError = Pipe()
+                try? x509Proc.run()
+                x509Proc.waitUntilExit()
+
+                let x509Data = x509Pipe.fileHandleForReading.readDataToEndOfFile()
+                guard let output = String(data: x509Data, encoding: .utf8), !output.isEmpty else { continue }
+
+                var commonName = "Apple Distribution Certificate"
+                var teamId = ""
+                var teamName = ""
+                var expirationDate = Date().addingTimeInterval(365 * 86400)
+
+                for line in output.components(separatedBy: .newlines) {
+                    if line.starts(with: "subject=") {
+                        let subjectStr = line.replacingOccurrences(of: "subject=", with: "").trimmingCharacters(in: .whitespaces)
+                        for part in subjectStr.components(separatedBy: "/") {
+                            if part.hasPrefix("CN=") {
+                                commonName = String(part.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                            } else if part.hasPrefix("OU=") || part.hasPrefix("UID=") {
+                                if teamId.isEmpty {
+                                    teamId = String(part.dropFirst(part.hasPrefix("OU=") ? 3 : 4)).trimmingCharacters(in: .whitespaces)
+                                }
+                            } else if part.hasPrefix("O=") {
+                                teamName = String(part.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                            }
+                        }
+                    } else if line.starts(with: "notAfter=") {
+                        let dateStr = line.replacingOccurrences(of: "notAfter=", with: "").trimmingCharacters(in: .whitespaces)
+                        let df = DateFormatter()
+                        df.dateFormat = "MMM d HH:mm:ss yyyy zzz"
+                        df.locale = Locale(identifier: "en_US_POSIX")
+                        if let d = df.date(from: dateStr) {
+                            expirationDate = d
+                        }
+                    }
+                }
+
+                if teamName.isEmpty { teamName = commonName }
+
+                return CertificateInfo(
+                    commonName: commonName,
+                    teamId: teamId,
+                    teamName: teamName,
+                    expirationDate: expirationDate,
+                    p12Path: p12Path
+                )
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
     public func parseP12(data: Data, password: String, path: String? = nil) throws -> CertificateInfo {
         var activeData = data
         let options: [String: Any] = [
@@ -250,7 +369,11 @@ public final class CredentialService: @unchecked Sendable {
             }
         }
 
+        // If SecPKCS12Import still failed, use direct OpenSSL parser
         guard status == errSecSuccess, let items = rawItems as? [[String: Any]], let firstItem = items.first else {
+            if let info = parseCertificateInfoWithOpenSSL(data: activeData, password: password, p12Path: path) {
+                return info
+            }
             throw CredentialError.invalidPasswordOrCorruptP12
         }
 

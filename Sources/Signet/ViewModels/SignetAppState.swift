@@ -1115,9 +1115,7 @@ public final class SignetAppState: ObservableObject {
                 let password = "SignetLocalPass\(Int.random(in: 100000...999999))"
                 let p12Data = try self.appleAuthService.exportKeychainIdentity(identityName: identity.name, password: password)
 
-                let p12Path = self.credentialService.savedP12URL
-                try p12Data.write(to: p12Path)
-                let certInfo = try self.credentialService.importAndSaveP12(from: p12Path, password: password)
+                let certInfo = try self.credentialService.importAndSaveP12Data(p12Data, password: password)
                 self.certificate = certInfo
                 self.p12Password = password
 
@@ -1147,6 +1145,9 @@ public final class SignetAppState: ObservableObject {
                 self.isPortalLoading = false
                 self.appendLog(LogMessage(level: .error, message: "Failed to apply local identity: \(error.localizedDescription)"))
                 self.portalStatusMessage = "Failed to export certificate: \(error.localizedDescription)"
+
+                // Show password prompt if password/decryption failed
+                self.promptForCertificatePassword(message: "Could not unlock '\(identity.name)'. If this certificate requires a custom password, enter it below:")
             }
         }
     }

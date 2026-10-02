@@ -46,12 +46,27 @@ extension SettingsView {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Apple Developer Portal Manager")
                             .font(.system(size: 14, weight: .bold))
-                        Text("Connected as: **\(appState.currentDeveloperSession?.userFullName ?? "")** • Team: **\(team.name)** (`\(team.id)`)")
+                        Text("Connected as: **\(appState.currentDeveloperSession?.userFullName ?? "")**")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
+
+                    // Multi-team switcher
+                    if appState.availableTeams.count > 1 {
+                        Picker("Team:", selection: $appState.selectedTeam) {
+                            ForEach(appState.availableTeams) { t in
+                                Text("\(t.name) (\(t.id))").tag(Optional(t))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 240)
+                    } else {
+                        Text("Team: **\(team.name)** (`\(team.id)`)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
 
                     if appState.isPortalLoading {
                         ProgressView().controlSize(.mini)

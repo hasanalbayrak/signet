@@ -246,4 +246,43 @@ final class SignetTests: XCTestCase {
         XCTAssertEqual(identity.teamId, "7Q6TQV2UKJ")
         XCTAssertEqual(identity.teamName, "WAGONN BILGI TEKNOLOJILERI VE DANISMANLIK LIMITED SIRKETI")
     }
+
+    func testAppleSiliconMacDeviceModel() {
+        let mac = Device(
+            udid: "80ED4E57-035D-5BD1-84F5-6B9B879A9BA0",
+            name: "Hasan MacBook Pro",
+            model: "Apple Silicon Mac (Mac14,6)",
+            productType: "Mac14,6",
+            osVersion: "macOS 15.3.1",
+            connectionType: .local,
+            isPaired: true,
+            isAvailable: true,
+            developerModeEnabled: true,
+            serialNumber: "GV9X0G54X2",
+            cpuArchitecture: "arm64",
+            buildVersion: "24D60",
+            isAppleSiliconMac: true
+        )
+
+        XCTAssertEqual(mac.displayName, "Hasan MacBook Pro (Mac)")
+        XCTAssertEqual(mac.deviceIconName, "macbook")
+        XCTAssertEqual(mac.connectionType, .local)
+        XCTAssertTrue(mac.isAppleSiliconMac)
+        XCTAssertEqual(mac.serialNumber, "GV9X0G54X2")
+        XCTAssertEqual(mac.cpuArchitecture, "arm64")
+        XCTAssertEqual(mac.buildVersion, "24D60")
+        XCTAssertTrue(mac.statusDescription.contains("Apple Silicon"))
+    }
+
+    func testAppleSiliconMacDiscovery() {
+        let mac = DeviceService.shared.getLocalAppleSiliconMac()
+        #if arch(arm64)
+        XCTAssertNotNil(mac)
+        XCTAssertEqual(mac?.connectionType, .local)
+        XCTAssertTrue(mac?.isAppleSiliconMac == true)
+        XCTAssertFalse(mac?.udid.isEmpty ?? true)
+        #else
+        XCTAssertNil(mac)
+        #endif
+    }
 }

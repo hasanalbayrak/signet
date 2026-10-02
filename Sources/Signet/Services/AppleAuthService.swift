@@ -606,7 +606,8 @@ public final class AppleAuthService: @unchecked Sendable {
         url: URL,
         method: String = "POST",
         bodyParams: [String: String]? = nil,
-        cookies: [HTTPCookie]
+        cookies: [HTTPCookie] = [],
+        urlSession: URLSession? = nil
     ) -> URLRequest {
         var req = URLRequest(url: url)
         req.httpMethod = method
@@ -615,15 +616,21 @@ public final class AppleAuthService: @unchecked Sendable {
         req.setValue("https://developer.apple.com/account/", forHTTPHeaderField: "Referer")
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
 
-        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        if !cookieHeader.isEmpty {
+        // If URLSession is supplied, ensure cookies are in its cookie storage and avoid overriding the Cookie header manually
+        if let session = urlSession, let storage = session.configuration.httpCookieStorage {
+            for c in cookies {
+                storage.setCookie(c)
+            }
+        } else if !cookies.isEmpty {
+            let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
             req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
 
         if let params = bodyParams {
             req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.~,"))
             let bodyString = params.map { key, value in
-                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
                 return "\(key)=\(encodedValue)"
             }.joined(separator: "&")
             req.httpBody = bodyString.data(using: .utf8)
@@ -647,7 +654,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "deviceNames": device.displayName,
             "register": "single"
         ]
-        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
 
         if let (data, response) = try? await urlSession.data(for: req),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -661,7 +668,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // Check if device is already registered in team
         let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
-        let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
         if let (listData, listResp) = try? await urlSession.data(for: listReq),
            let listHttp = listResp as? HTTPURLResponse, listHttp.statusCode == 200,
            let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
@@ -728,7 +735,7 @@ public final class AppleAuthService: @unchecked Sendable {
                 "type": certType,
                 "csrContent": csrContent
             ]
-            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies)
+            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
 
             if let (data, response) = try? await urlSession.data(for: req),
                let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -749,7 +756,7 @@ public final class AppleAuthService: @unchecked Sendable {
                 // If certificateId exists but certContent wasn't in response, download directly
                 if !certId.isEmpty && rawCerData == nil {
                     let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certId)&type=\(certType)")!
-                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
                     if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
                        let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
                         rawCerData = dlData
@@ -774,17 +781,16 @@ public final class AppleAuthService: @unchecked Sendable {
             let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
             let listParams = [
                 "teamId": team.id,
-                "types": "83Q87W3TGH,5QPB9NHCEI",
                 "pageNumber": "1",
                 "pageSize": "500",
                 "sort": "certRequestStatusCode=asc"
             ]
-            let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: listParams, cookies: cookies)
+            let listReq = makePortalRequest(url: listURL, method: "POST", bodyParams: listParams, cookies: cookies, urlSession: urlSession)
 
             if let (listData, listResp) = try? await urlSession.data(for: listReq),
                let listHttp = listResp as? HTTPURLResponse, listHttp.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
-               let certs = json["certRequests"] as? [[String: Any]] {
+               let certs = (json["certRequests"] as? [[String: Any]]) ?? (json["certificates"] as? [[String: Any]]) {
 
                 let activeCerts = certs.filter {
                     ($0["statusString"] as? String) == "Issued" ||
@@ -798,7 +804,7 @@ public final class AppleAuthService: @unchecked Sendable {
                     }) ?? activeCerts.last!
 
                     let candId = (candidate["certificateId"] as? String) ?? (candidate["certRequestId"] as? String) ?? ""
-                    let candType = (candidate["certificateTypeDisplayId"] as? String) ?? "83Q87W3TGH"
+                    let candType = (candidate["certificateTypeDisplayId"] as? String) ?? (candidate["type"] as? String) ?? "83Q87W3TGH"
                     let candName = (candidate["name"] as? String) ?? "Apple Development"
 
                     onLog?(LogMessage(level: .warning, message: "Team certificate limit reached on Apple Developer Portal. Automatically revoking '\(candName)' (ID: \(candId)) to make room for Signet keypair (matching Sideloadly behavior)..."))
@@ -815,7 +821,7 @@ public final class AppleAuthService: @unchecked Sendable {
                                 "type": certType,
                                 "csrContent": csrContent
                             ]
-                            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies)
+                            let req = makePortalRequest(url: submitURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
 
                             if let (rData, rResp) = try? await urlSession.data(for: req),
                                let rHttp = rResp as? HTTPURLResponse, rHttp.statusCode == 200,
@@ -834,7 +840,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
                                 if !certId.isEmpty && rawCerData == nil {
                                     let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certId)&type=\(certType)")!
-                                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
                                     if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
                                        let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
                                         rawCerData = dlData
@@ -892,7 +898,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "includeExpiredProfiles": "false",
             "onlyCountLists": "true"
         ]
-        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies)
+        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies, urlSession: urlSession)
 
         if let (xcData, xcResp) = try? await urlSession.data(for: xcodeReq),
            let xcHttp = xcResp as? HTTPURLResponse, xcHttp.statusCode == 200,
@@ -913,7 +919,7 @@ public final class AppleAuthService: @unchecked Sendable {
         // 2. Find or create App ID (Bundle ID)
         onLog?(LogMessage(level: .info, message: "Ensuring Wildcard App ID exists on Apple Developer Portal..."))
         let listAppIdsURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/listAppIds.action")!
-        let listAppReq = makePortalRequest(url: listAppIdsURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let listAppReq = makePortalRequest(url: listAppIdsURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
 
         var appIdId = ""
         if let (appData, appResp) = try? await urlSession.data(for: listAppReq),
@@ -940,7 +946,7 @@ public final class AppleAuthService: @unchecked Sendable {
                 "type": "wildcard",
                 "identifier": "*"
             ]
-            let addAppReq = makePortalRequest(url: addAppURL, method: "POST", bodyParams: addAppParams, cookies: cookies)
+            let addAppReq = makePortalRequest(url: addAppURL, method: "POST", bodyParams: addAppParams, cookies: cookies, urlSession: urlSession)
             if let (addData, addResp) = try? await urlSession.data(for: addAppReq),
                let addHttp = addResp as? HTTPURLResponse, addHttp.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: addData) as? [String: Any],
@@ -965,7 +971,7 @@ public final class AppleAuthService: @unchecked Sendable {
             createParams["deviceIds"] = dId
         }
 
-        let createProfReq = makePortalRequest(url: createProfURL, method: "POST", bodyParams: createParams, cookies: cookies)
+        let createProfReq = makePortalRequest(url: createProfURL, method: "POST", bodyParams: createParams, cookies: cookies, urlSession: urlSession)
 
         var profileId = ""
         if let (cData, cResp) = try? await urlSession.data(for: createProfReq),
@@ -982,7 +988,7 @@ public final class AppleAuthService: @unchecked Sendable {
         // 4. Download profile content if created
         if !profileId.isEmpty {
             let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(profileId)")!
-            let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+            let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
             if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
                let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
                 onLog?(LogMessage(level: .success, message: "Downloaded profile: \(profName)"))
@@ -992,7 +998,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // 5. Fallback: check existing profiles on portal
         let listProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/listProvisioningProfiles.action")!
-        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let listProfReq = makePortalRequest(url: listProfURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
         if let (lData, lResp) = try? await urlSession.data(for: listProfReq),
            let lHttp = lResp as? HTTPURLResponse, lHttp.statusCode == 200,
            let json = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
@@ -1000,7 +1006,7 @@ public final class AppleAuthService: @unchecked Sendable {
             for prof in profiles {
                 if let pId = prof["provisioningProfileId"] as? String {
                     let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
-                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
                     if let (dlData, dlResp) = try? await urlSession.data(for: dlReq),
                        let dlHttp = dlResp as? HTTPURLResponse, dlHttp.statusCode == 200, !dlData.isEmpty {
                         onLog?(LogMessage(level: .info, message: "Downloaded active team profile."))
@@ -1045,9 +1051,48 @@ public final class AppleAuthService: @unchecked Sendable {
         teamId: String,
         cookies: [HTTPCookie]
     ) async {
+        // 1. POST services-account selectTeam
         let selectURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/selectTeam.action")!
-        let req = makePortalRequest(url: selectURL, method: "POST", bodyParams: ["teamId": teamId], cookies: cookies)
-        _ = try? await urlSession.data(for: req)
+        let req = makePortalRequest(url: selectURL, method: "POST", bodyParams: ["teamId": teamId], cookies: cookies, urlSession: urlSession)
+        if let (_, response) = try? await urlSession.data(for: req),
+           let http = response as? HTTPURLResponse,
+           let headerFields = http.allHeaderFields as? [String: String],
+           let respURL = http.url {
+            let respCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: respURL)
+            for c in respCookies {
+                urlSession.configuration.httpCookieStorage?.setCookie(c)
+            }
+        }
+
+        // 2. GET account selectTeam
+        let getURL = URL(string: "https://developer.apple.com/account/selectTeam.action?teamId=\(teamId)")!
+        let getReq = makePortalRequest(url: getURL, method: "GET", cookies: cookies, urlSession: urlSession)
+        if let (_, response) = try? await urlSession.data(for: getReq),
+           let http = response as? HTTPURLResponse,
+           let headerFields = http.allHeaderFields as? [String: String],
+           let respURL = http.url {
+            let respCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: respURL)
+            for c in respCookies {
+                urlSession.configuration.httpCookieStorage?.setCookie(c)
+            }
+        }
+
+        // 3. POST Olympus session
+        let switchURL = olympusBase.appendingPathComponent("session")
+        var switchReq = URLRequest(url: switchURL)
+        switchReq.httpMethod = "POST"
+        switchReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let switchBody = ["teamId": teamId]
+        switchReq.httpBody = try? JSONSerialization.data(withJSONObject: switchBody)
+        if let (_, response) = try? await urlSession.data(for: switchReq),
+           let http = response as? HTTPURLResponse,
+           let headerFields = http.allHeaderFields as? [String: String],
+           let respURL = http.url {
+            let respCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: respURL)
+            for c in respCookies {
+                urlSession.configuration.httpCookieStorage?.setCookie(c)
+            }
+        }
     }
 
     private func parsePortalResponse(_ data: Data) -> [String: Any]? {
@@ -1070,7 +1115,7 @@ public final class AppleAuthService: @unchecked Sendable {
         await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: cookies)
 
         let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/listDevices.action")!
-        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
 
         if let (data, response) = try? await urlSession.data(for: req),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -1081,7 +1126,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // Fallback to Xcode endpoint
         let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listDevices.action")!
-        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: xcReq),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let dict = parsePortalResponse(data),
@@ -1118,7 +1163,7 @@ public final class AppleAuthService: @unchecked Sendable {
         await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: cookies)
 
         let deleteURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/deleteDevice.action")!
-        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies)
+        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies, urlSession: urlSession)
 
         if let (data, response) = try? await urlSession.data(for: req),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -1128,7 +1173,7 @@ public final class AppleAuthService: @unchecked Sendable {
         }
 
         let disableURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/device/disableDevice.action")!
-        let disableReq = makePortalRequest(url: disableURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies)
+        let disableReq = makePortalRequest(url: disableURL, method: "POST", bodyParams: ["teamId": team.id, "deviceId": deviceId], cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: disableReq),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let json = parsePortalResponse(data),
@@ -1158,7 +1203,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "deviceNames": name,
             "register": "single"
         ]
-        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
         let (data, response) = try await urlSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = parsePortalResponse(data) else {
@@ -1189,12 +1234,11 @@ public final class AppleAuthService: @unchecked Sendable {
         let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
         let params = [
             "teamId": team.id,
-            "types": "83Q87W3TGH,5QPB9NHCEI,R851327ND5,99Q9982463",
             "pageNumber": "1",
             "pageSize": "500",
             "sort": "certRequestStatusCode=asc"
         ]
-        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: params, cookies: cookies)
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: req),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let dict = parsePortalResponse(data),
@@ -1204,7 +1248,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // Fallback to Xcode endpoint
         let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listAllDevelopmentCerts.action")!
-        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id], cookies: cookies)
+        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id], cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: xcReq),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let dict = parsePortalResponse(data),
@@ -1269,7 +1313,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "certificateId": certificateId,
             "type": type
         ]
-        let req = makePortalRequest(url: revokeURL, method: "POST", bodyParams: params, cookies: cookies)
+        let req = makePortalRequest(url: revokeURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
         guard let (data, response) = try? await urlSession.data(for: req),
               let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = parsePortalResponse(data) else {
@@ -1289,7 +1333,7 @@ public final class AppleAuthService: @unchecked Sendable {
         let cookies = extractCookies(from: session)
         await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: cookies)
         let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/downloadCertificateContent.action?teamId=\(team.id)&certificateId=\(certificateId)&type=\(type)")!
-        let req = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+        let req = makePortalRequest(url: dlURL, method: "GET", cookies: cookies, urlSession: urlSession)
         let (data, response) = try await urlSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty else {
             throw AppleDeveloperError.apiError("Failed to download certificate from Apple Developer Portal.")
@@ -1312,7 +1356,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "includeExpiredProfiles": "false",
             "onlyCountLists": "true"
         ]
-        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies)
+        let xcodeReq = makePortalRequest(url: xcodeURL, method: "POST", bodyParams: xcodeParams, cookies: cookies, urlSession: urlSession)
 
         if let (xcData, xcResp) = try? await urlSession.data(for: xcodeReq),
            let xcHttp = xcResp as? HTTPURLResponse, xcHttp.statusCode == 200,
@@ -1340,7 +1384,7 @@ public final class AppleAuthService: @unchecked Sendable {
         await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: cookies)
 
         let listURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/listAppIds.action")!
-        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let req = makePortalRequest(url: listURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: req),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let dict = parsePortalResponse(data),
@@ -1350,7 +1394,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
         // Fallback to Xcode endpoint
         let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listAppIds.action")!
-        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies)
+        let xcReq = makePortalRequest(url: xcURL, method: "POST", bodyParams: ["teamId": team.id, "pageSize": "500"], cookies: cookies, urlSession: urlSession)
         if let (data, response) = try? await urlSession.data(for: xcReq),
            let http = response as? HTTPURLResponse, http.statusCode == 200,
            let dict = parsePortalResponse(data),
@@ -1386,7 +1430,7 @@ public final class AppleAuthService: @unchecked Sendable {
         await selectPortalTeam(urlSession: urlSession, teamId: team.id, cookies: cookies)
 
         let deleteURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/identifiers/deleteAppId.action")!
-        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "appIdId": appIdId], cookies: cookies)
+        let req = makePortalRequest(url: deleteURL, method: "POST", bodyParams: ["teamId": team.id, "appIdId": appIdId], cookies: cookies, urlSession: urlSession)
         let (data, response) = try await urlSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = parsePortalResponse(data),
@@ -1414,7 +1458,7 @@ public final class AppleAuthService: @unchecked Sendable {
             "identifier": identifier,
             "type": type
         ]
-        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies)
+        let req = makePortalRequest(url: addURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
         let (data, response) = try await urlSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = parsePortalResponse(data) else {

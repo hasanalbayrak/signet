@@ -50,6 +50,17 @@ public final class InstallerService: @unchecked Sendable {
 
         onLog?(LogMessage(level: .info, message: "Deploying '\(ipaURL.lastPathComponent)' to \(device.displayName)..."))
 
+        // Handle native installation on Apple Silicon Mac
+        if device.connectionType == .local || device.isAppleSiliconMac {
+            onLog?(LogMessage(level: .info, message: "Deploying natively to local Apple Silicon Mac (/Applications)..."))
+            try await installToLocalMac(
+                ipaURL: ipaURL,
+                onProgress: onProgress,
+                onLog: onLog
+            )
+            return
+        }
+
         // Check if devicectl is available
         if let xcrun = binaryManager.resolveDevicectl() {
             onLog?(LogMessage(level: .verbose, message: "Using Apple devicectl (CoreDevice) for deployment..."))
@@ -188,5 +199,83 @@ public final class InstallerService: @unchecked Sendable {
 
         let numStr = line[line.index(after: openBracket)..<percentIndex].trimmingCharacters(in: .whitespaces)
         return Int(numStr)
+    }
+
+    // MARK: - Local Mac (Apple Silicon) Installation Backend
+
+    private func installToLocalMac(
+        ipaURL: URL,
+        onProgress: (@Sendable (Double, String) -> Void)?,
+        onLog: (@Sendable (LogMessage) -> Void)?
+    ) async throws {
+        onProgress?(0.15, "Unpacking iOS app bundle for macOS...")
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SignetLocalMac_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Extract IPA using ditto (ditto preserves symlinks and permissions natively on macOS)
+        let ditto = Process()
+        ditto.launchPath = "/usr/bin/ditto"
+        ditto.arguments = ["-xk", ipaURL.path, tempDir.path]
+        try ditto.run()
+        ditto.waitUntilExit()
+        guard ditto.terminationStatus == 0 else {
+            throw DeploymentError.installationFailed("Failed to unpack IPA bundle for Mac installation.")
+        }
+
+        let payloadDir = tempDir.appendingPathComponent("Payload")
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: payloadDir.path),
+              let appName = items.first(where: { $0.hasSuffix(".app") }) else {
+            throw DeploymentError.installationFailed("Could not locate .app bundle inside IPA Payload.")
+        }
+
+        let extractedAppURL = payloadDir.appendingPathComponent(appName)
+        onProgress?(0.5, "Moving \(appName) to Applications...")
+
+        // Determine destination: /Applications or ~/Applications
+        let globalApps = URL(fileURLWithPath: "/Applications")
+        let userApps = FileManager.default.urls(for: .applicationDirectory, in: .userDomainMask).first ?? globalApps
+
+        var targetAppsDir = globalApps
+        if !FileManager.default.isWritableFile(atPath: targetAppsDir.path) {
+            targetAppsDir = userApps
+            try? FileManager.default.createDirectory(at: targetAppsDir, withIntermediateDirectories: true)
+        }
+
+        let destAppURL = targetAppsDir.appendingPathComponent(appName)
+        if FileManager.default.fileExists(atPath: destAppURL.path) {
+            onLog?(LogMessage(level: .info, message: "Replacing existing app at \(destAppURL.path)..."))
+            try? FileManager.default.removeItem(at: destAppURL)
+        }
+
+        var finalAppURL = destAppURL
+        do {
+            try FileManager.default.moveItem(at: extractedAppURL, to: destAppURL)
+        } catch {
+            // Fallback to user applications if permission error
+            let fallbackURL = userApps.appendingPathComponent(appName)
+            if FileManager.default.fileExists(atPath: fallbackURL.path) {
+                try? FileManager.default.removeItem(at: fallbackURL)
+            }
+            try FileManager.default.moveItem(at: extractedAppURL, to: fallbackURL)
+            finalAppURL = fallbackURL
+        }
+
+        onProgress?(0.8, "Clearing Apple Quarantine attributes...")
+        let xattr = Process()
+        xattr.launchPath = "/usr/bin/xattr"
+        xattr.arguments = ["-cr", finalAppURL.path]
+        try? xattr.run()
+        xattr.waitUntilExit()
+
+        onProgress?(1.0, "App installed to \(finalAppURL.lastPathComponent)")
+        onLog?(LogMessage(level: .success, message: "Installed successfully to: \(finalAppURL.path)"))
+
+        // Launch app on Mac
+        let openProc = Process()
+        openProc.launchPath = "/usr/bin/open"
+        openProc.arguments = [finalAppURL.path]
+        try? openProc.run()
+        onLog?(LogMessage(level: .success, message: "Launched '\(finalAppURL.deletingPathExtension().lastPathComponent)' on your Mac!"))
     }
 }

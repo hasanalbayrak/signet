@@ -84,7 +84,7 @@ private struct AppleWebViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent() // Fresh session each time, or default
+        config.websiteDataStore = .default()
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -163,6 +163,7 @@ private struct AppleWebViewRepresentable: NSViewRepresentable {
 
                         let fetchScript = """
                         (async function() {
+                            let teams = [];
                             try {
                                 let resp = await fetch('/services-account/QH65B2/account/listTeams.action', {
                                     method: 'POST',
@@ -175,12 +176,76 @@ private struct AppleWebViewRepresentable: NSViewRepresentable {
                                 });
                                 if (resp.ok) {
                                     let data = await resp.json();
-                                    if (data && data.teams) {
-                                        return JSON.stringify(data.teams);
+                                    let arr = data.teams || data.developerTeams || [];
+                                    for (let item of arr) {
+                                        let tid = item.teamId || item.id || '';
+                                        if (tid && !teams.some(t => t.teamId === tid)) {
+                                            teams.push({
+                                                teamId: tid,
+                                                name: item.name || item.teamName || 'Apple Developer Team',
+                                                type: item.type || 'Company/Organization',
+                                                status: item.status || 'active'
+                                            });
+                                        }
                                     }
                                 }
                             } catch(e) {}
-                            return "[]";
+
+                            try {
+                                let resp2 = await fetch('https://appstoreconnect.apple.com/olympus/v1/session', {
+                                    credentials: 'include'
+                                });
+                                if (resp2.ok) {
+                                    let data2 = await resp2.json();
+                                    if (data2 && data2.developerTeams) {
+                                        for (let item of data2.developerTeams) {
+                                            let tid = item.teamId || item.id || '';
+                                            if (tid && !teams.some(t => t.teamId === tid)) {
+                                                teams.push({
+                                                    teamId: tid,
+                                                    name: item.name || 'Apple Developer Team',
+                                                    type: item.type || 'Individual',
+                                                    status: item.status || 'active'
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch(e) {}
+
+                            try {
+                                let selects = document.querySelectorAll('select#team-select, select.team-select, select[name="teamId"]');
+                                for (let sel of selects) {
+                                    for (let opt of sel.options) {
+                                        if (opt.value && opt.value.length >= 8 && opt.value.length <= 12 && !teams.some(t => t.teamId === opt.value)) {
+                                            teams.push({
+                                                teamId: opt.value,
+                                                name: opt.text.trim() || 'Apple Developer Team',
+                                                type: 'Company/Organization',
+                                                status: 'active'
+                                            });
+                                        }
+                                    }
+                                }
+                                let teamLinks = document.querySelectorAll('[data-team-id], a[href*="teamId="]');
+                                for (let el of teamLinks) {
+                                    let tid = el.getAttribute('data-team-id');
+                                    if (!tid) {
+                                        let match = el.getAttribute('href')?.match(/teamId=([A-Z0-9]{10})/);
+                                        if (match) tid = match[1];
+                                    }
+                                    if (tid && !teams.some(t => t.teamId === tid)) {
+                                        teams.push({
+                                            teamId: tid,
+                                            name: el.innerText.trim() || 'Apple Developer Team',
+                                            type: 'Company/Organization',
+                                            status: 'active'
+                                        });
+                                    }
+                                }
+                            } catch(e) {}
+
+                            return JSON.stringify(teams);
                         })()
                         """
 

@@ -40,7 +40,19 @@ public final class SignetAppState: ObservableObject {
     // Apple Developer Auto-Provisioning (API Key & Apple ID)
     @Published public var ascCredentials = AppStoreConnectCredentials(keyId: "", issuerId: "", privateKeyPem: "")
     @Published public var availableTeams: [DeveloperTeam] = []
-    @Published public var selectedTeam: DeveloperTeam?
+    @Published public var selectedTeam: DeveloperTeam? {
+        didSet {
+            guard let team = selectedTeam else { return }
+            if currentDeveloperSession?.selectedTeamId != team.id {
+                currentDeveloperSession?.selectedTeamId = team.id
+                currentDeveloperSession?.selectedTeamName = team.name
+                if let session = currentDeveloperSession {
+                    saveAppleDeveloperSession(session)
+                }
+            }
+            loadPortalData()
+        }
+    }
     @Published public var autoProvisioningStep: AutoProvisioningStep = .idle
 
     // Direct Apple ID & 2FA State
@@ -351,16 +363,20 @@ public final class SignetAppState: ObservableObject {
                 self.isAppleIDSigningIn = false
                 self.appleIDEmail = session.appleId
                 self.currentDeveloperSession = session
-                self.availableTeams = teams
-                self.selectedTeam = teams.first
+                if !teams.isEmpty {
+                    self.availableTeams = teams
+                    self.selectedTeam = teams.first
+                } else if self.selectedTeam == nil, let first = self.availableTeams.first {
+                    self.selectedTeam = first
+                }
                 self.settingsInlineErrorMessage = nil
                 self.saveAppleDeveloperSession(session)
 
-                if teams.isEmpty {
+                if self.availableTeams.isEmpty {
                     self.appendLog(LogMessage(level: .warning, message: "Logged in as \(session.userFullName), but no developer teams were found. Try clicking 'Refresh Teams'."))
                 } else {
-                    let teamTitles = teams.map { $0.displayTitle }.joined(separator: ", ")
-                    self.appendLog(LogMessage(level: .success, message: "Logged in via Apple WebKit as \(session.userFullName) (\(teams.count) team(s) found: \(teamTitles))."))
+                    let teamTitles = self.availableTeams.map { $0.displayTitle }.joined(separator: ", ")
+                    self.appendLog(LogMessage(level: .success, message: "Logged in via Apple WebKit as \(session.userFullName) (\(self.availableTeams.count) team(s) active: \(teamTitles))."))
                 }
             } catch {
                 self.isAppleIDSigningIn = false
@@ -505,7 +521,7 @@ public final class SignetAppState: ObservableObject {
                     let teamTitles = teams.map { $0.displayTitle }.joined(separator: ", ")
                     self.appendLog(LogMessage(level: .success, message: "Discovered \(teams.count) developer team(s): \(teamTitles)"))
                 } else {
-                    self.appendLog(LogMessage(level: .warning, message: "No developer teams returned by Apple servers."))
+                    self.appendLog(LogMessage(level: .warning, message: "No developer teams returned by Apple servers. Preserving cached teams."))
                 }
             } catch {
                 self.appendLog(LogMessage(level: .error, message: "Failed to refresh teams: \(error.localizedDescription)"))
@@ -519,7 +535,7 @@ public final class SignetAppState: ObservableObject {
            let str = String(data: data, encoding: .utf8) {
             try? credentialService.savePasswordToKeychain(str, account: "apple_developer_session")
         }
-        if let teamsData = try? JSONEncoder().encode(availableTeams) {
+        if !availableTeams.isEmpty, let teamsData = try? JSONEncoder().encode(availableTeams) {
             UserDefaults.standard.set(teamsData, forKey: "saved_developer_teams")
         }
     }

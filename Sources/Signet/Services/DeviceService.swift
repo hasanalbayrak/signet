@@ -41,10 +41,19 @@ public final class DeviceService: @unchecked Sendable {
             }
         }
 
-        // Return sorted list: available & paired first, then by name
+        // 3. Include local Apple Silicon Mac if running on arm64
+        if let macDevice = getLocalAppleSiliconMac() {
+            devicesByUDID[macDevice.udid.uppercased()] = macDevice
+        }
+
+        // Return sorted list: available & paired first, then iOS devices, then Mac, then by name
         return devicesByUDID.values.sorted { d1, d2 in
             if d1.isAvailable != d2.isAvailable {
                 return d1.isAvailable && !d2.isAvailable
+            }
+            if (d1.connectionType == .local) != (d2.connectionType == .local) {
+                // If an external iOS device is connected and available, prefer it first; otherwise Mac is accessible
+                return d2.connectionType == .local
             }
             return d1.displayName.localizedCaseInsensitiveCompare(d2.displayName) == .orderedAscending
         }
@@ -89,6 +98,9 @@ public final class DeviceService: @unchecked Sendable {
             var pairingState = ""
             var isAvailable = false
             var devMode: Bool? = nil
+            var serialNumber: String? = nil
+            var cpuArchitecture: String? = nil
+            var buildVersion: String? = nil
 
             // Read from modern "properties" dict if available
             if let props = item["properties"] as? [String: Any] {
@@ -96,10 +108,17 @@ public final class DeviceService: @unchecked Sendable {
                     udid = hardware["udid"] as? String ?? ""
                     marketingName = hardware["marketingName"] as? String ?? ""
                     productType = hardware["productType"] as? String ?? ""
+                    serialNumber = hardware["serialNumber"] as? String
+                    cpuArchitecture = hardware["cpuArchitecture"] as? String
                 }
                 if let software = props["software"] as? [String: Any] {
                     if let osVerDict = software["osVersionNumber"] as? [String: Any] {
                         osVersion = osVerDict["stringValue"] as? String ?? ""
+                    }
+                    if let osBuildDict = software["osBuildVersion"] as? [String: Any] {
+                        buildVersion = osBuildDict["stringValue"] as? String
+                    } else if let bStr = software["osBuildVersion"] as? String {
+                        buildVersion = bStr
                     }
                 }
                 if let connection = props["connection"] as? [String: Any] {
@@ -129,6 +148,12 @@ public final class DeviceService: @unchecked Sendable {
                 }
                 if productType.isEmpty {
                     productType = hw["productType"] as? String ?? ""
+                }
+                if serialNumber == nil {
+                    serialNumber = hw["serialNumber"] as? String
+                }
+                if cpuArchitecture == nil {
+                    cpuArchitecture = hw["cpuArchitecture"] as? String
                 }
             }
             if deviceName.isEmpty, let devProp = item["deviceProperties"] as? [String: Any] {
@@ -160,7 +185,10 @@ public final class DeviceService: @unchecked Sendable {
                 connectionType: .usb, // devicectl handles both USB & Wi-Fi transparently
                 isPaired: isPaired,
                 isAvailable: isAvailable,
-                developerModeEnabled: devMode
+                developerModeEnabled: devMode,
+                serialNumber: serialNumber,
+                cpuArchitecture: cpuArchitecture,
+                buildVersion: buildVersion
             )
             foundDevices.append(device)
         }
@@ -216,6 +244,9 @@ public final class DeviceService: @unchecked Sendable {
         var model = ""
         var productType = ""
         var osVersion = ""
+        var serialNumber: String? = nil
+        var cpuArchitecture: String? = nil
+        var buildVersion: String? = nil
 
         if let res = try? await runner.run(executablePath: infoPath, arguments: ["-u", udid, "-k", "DeviceName"]),
            res.isSuccess {
@@ -233,6 +264,24 @@ public final class DeviceService: @unchecked Sendable {
             osVersion = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        if let res = try? await runner.run(executablePath: infoPath, arguments: ["-u", udid, "-k", "SerialNumber"]),
+           res.isSuccess {
+            let val = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !val.isEmpty { serialNumber = val }
+        }
+
+        if let res = try? await runner.run(executablePath: infoPath, arguments: ["-u", udid, "-k", "CPUArchitecture"]),
+           res.isSuccess {
+            let val = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !val.isEmpty { cpuArchitecture = val }
+        }
+
+        if let res = try? await runner.run(executablePath: infoPath, arguments: ["-u", udid, "-k", "BuildVersion"]),
+           res.isSuccess {
+            let val = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !val.isEmpty { buildVersion = val }
+        }
+
         return Device(
             udid: udid,
             name: name,
@@ -241,7 +290,10 @@ public final class DeviceService: @unchecked Sendable {
             osVersion: osVersion,
             connectionType: .usb,
             isPaired: true,
-            isAvailable: true
+            isAvailable: true,
+            serialNumber: serialNumber,
+            cpuArchitecture: cpuArchitecture,
+            buildVersion: buildVersion
         )
     }
 
@@ -277,5 +329,103 @@ public final class DeviceService: @unchecked Sendable {
             "iPhone11,8": "iPhone XR"
         ]
         return map[type] ?? type
+    }
+
+    // MARK: - Apple Silicon Mac Discovery
+
+    public func getLocalAppleSiliconMac() -> Device? {
+        #if arch(arm64)
+        let isArm64 = true
+        #else
+        let isArm64 = false
+        #endif
+
+        guard isArm64 else { return nil }
+
+        let uuid = getMacHardwareUUID() ?? "MAC-\(Host.current().localizedName ?? "LOCAL")"
+        let (model, serial) = getMacHardwareModelAndSerial()
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        let buildVersion = getMacKernelOSVersion()
+        let hostName = Host.current().localizedName ?? "My Mac"
+
+        return Device(
+            udid: uuid,
+            name: "\(hostName) (Apple Silicon)",
+            model: "Apple Silicon Mac (\(model))",
+            productType: model,
+            osVersion: osVersion,
+            connectionType: .local,
+            isPaired: true,
+            isAvailable: true,
+            developerModeEnabled: true,
+            serialNumber: serial,
+            cpuArchitecture: "arm64",
+            buildVersion: buildVersion,
+            isAppleSiliconMac: true
+        )
+    }
+
+    private func getMacHardwareUUID() -> String? {
+        let task = Process()
+        task.launchPath = "/usr/sbin/ioreg"
+        task.arguments = ["-rd1", "-c", "IOPlatformExpertDevice"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        try? task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return nil }
+
+        for line in output.components(separatedBy: .newlines) {
+            if line.contains("IOPlatformUUID") {
+                let parts = line.components(separatedBy: "=")
+                if parts.count >= 2 {
+                    return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"\r\n\t"))
+                }
+            }
+        }
+        return nil
+    }
+
+    private func getMacHardwareModelAndSerial() -> (model: String, serial: String?) {
+        var size = 0
+        sysctlbyname("hw.model", nil, &size, nil, 0)
+        var modelChars = [CChar](repeating: 0, count: max(1, size))
+        sysctlbyname("hw.model", &modelChars, &size, nil, 0)
+        let model = String(cString: modelChars)
+
+        let task = Process()
+        task.launchPath = "/usr/sbin/ioreg"
+        task.arguments = ["-rd1", "-c", "IOPlatformExpertDevice"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        try? task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        var serial: String? = nil
+        if let output = String(data: data, encoding: .utf8) {
+            for line in output.components(separatedBy: .newlines) {
+                if line.contains("IOPlatformSerialNumber") {
+                    let parts = line.components(separatedBy: "=")
+                    if parts.count >= 2 {
+                        serial = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"\r\n\t"))
+                    }
+                }
+            }
+        }
+
+        return (model.isEmpty ? "Mac" : model, serial)
+    }
+
+    private func getMacKernelOSVersion() -> String? {
+        var size = 0
+        sysctlbyname("kern.osversion", nil, &size, nil, 0)
+        guard size > 0 else { return nil }
+        var chars = [CChar](repeating: 0, count: size)
+        sysctlbyname("kern.osversion", &chars, &size, nil, 0)
+        let str = String(cString: chars)
+        return str.isEmpty ? nil : str
     }
 }

@@ -211,4 +211,39 @@ final class SignetTests: XCTestCase {
             XCTAssertNotNil(BinaryManager.shared.resolveBrew())
         }
     }
+
+    func testCookieEncodingAndDecoding() {
+        guard let cookie = HTTPCookie(properties: [
+            .name: "my_cookie",
+            .value: "secret_value_123",
+            .domain: ".apple.com",
+            .path: "/"
+        ]) else {
+            XCTFail("Failed to create test HTTPCookie")
+            return
+        }
+
+        let encoded = AppleAuthService.encodeCookies([cookie])
+        XCTAssertNotNil(encoded)
+
+        let decoded = AppleAuthService.decodeCookies(from: encoded!)
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded.first?.name, "my_cookie")
+        XCTAssertEqual(decoded.first?.value, "secret_value_123")
+        XCTAssertEqual(decoded.first?.domain, ".apple.com")
+        XCTAssertEqual(decoded.first?.path, "/")
+    }
+
+    func testKeychainIdentityWithTeamDetails() {
+        let identity = KeychainIdentity(
+            id: "5F38A812A2120AF6C79E9AA236A2DCA303C6A1CF",
+            name: "Apple Development: Hasan Huseyin Albayrak (262LJ4XX94)",
+            teamId: "7Q6TQV2UKJ",
+            teamName: "WAGONN BILGI TEKNOLOJILERI VE DANISMANLIK LIMITED SIRKETI"
+        )
+
+        XCTAssertEqual(identity.id, "5F38A812A2120AF6C79E9AA236A2DCA303C6A1CF")
+        XCTAssertEqual(identity.teamId, "7Q6TQV2UKJ")
+        XCTAssertEqual(identity.teamName, "WAGONN BILGI TEKNOLOJILERI VE DANISMANLIK LIMITED SIRKETI")
+    }
 }

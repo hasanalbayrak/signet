@@ -48,7 +48,7 @@ cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
     <key>CFBundleExecutable</key>
     <string>Signet</string>
     <key>CFBundleIdentifier</key>
-    <string>com.signet.macos</string>
+    <string>com.hasanalbayrak.signet</string>
     <key>CFBundleName</key>
     <string>Signet</string>
     <key>CFBundleDisplayName</key>

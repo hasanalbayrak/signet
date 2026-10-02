@@ -201,6 +201,11 @@ public final class BinaryManager: @unchecked Sendable {
         var env = ProcessInfo.processInfo.environment
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+        var pathEnv = env["PATH"] ?? ""
+        if !pathEnv.contains("/opt/homebrew/bin") {
+            pathEnv = "/opt/homebrew/bin:/usr/local/bin:" + pathEnv
+        }
+        env["PATH"] = pathEnv
         task.environment = env
 
         let pipe = Pipe()

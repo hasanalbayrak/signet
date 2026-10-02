@@ -482,10 +482,10 @@ public final class SignetAppState: ObservableObject {
             guard let self = self else { return }
             do {
                 var cookies: [HTTPCookie] = []
-                if let data = session.cookiesData,
-                   let unarchived = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, HTTPCookie.self], from: data) as? [HTTPCookie] {
-                    cookies = unarchived
+                if let data = session.cookiesData {
+                    cookies = AppleAuthService.decodeCookies(from: data)
                 }
+
 
                 let sessionConfig = URLSessionConfiguration.ephemeral
                 sessionConfig.httpCookieAcceptPolicy = .always
@@ -933,6 +933,46 @@ public final class SignetAppState: ObservableObject {
 
     public func refreshKeychainIdentities() {
         self.keychainIdentities = appleAuthService.findLocalKeychainIdentities()
+    }
+
+    public func useLocalKeychainIdentity(_ identity: KeychainIdentity) {
+        appendLog(LogMessage(level: .info, message: "Exporting and applying local Keychain identity '\(identity.name)'..."))
+        isPortalLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let password = "SignetLocalPass\(Int.random(in: 100000...999999))"
+                let p12Data = try self.appleAuthService.exportKeychainIdentity(identityName: identity.name, password: password)
+
+                let p12Path = self.credentialService.savedP12URL
+                try p12Data.write(to: p12Path)
+                let certInfo = try self.credentialService.importAndSaveP12(from: p12Path, password: password)
+                self.certificate = certInfo
+                self.p12Password = password
+
+                self.appendLog(LogMessage(level: .success, message: "Active certificate set from Keychain: \(certInfo.teamName) (expires in \(certInfo.daysRemaining) days)"))
+                self.portalStatusMessage = "Successfully activated local certificate: \(certInfo.teamName)"
+
+                // If an Apple Developer session is active, try to fetch or create a wildcard profile to match
+                if let session = self.currentDeveloperSession, let team = self.selectedTeam {
+                    self.appendLog(LogMessage(level: .info, message: "Resolving matching Wildcard Provisioning Profile for team '\(team.name)'..."))
+                    if let profData = await self.appleAuthService.fetchTeamWildcardProfile(session: session, team: team) {
+                        let profPath = self.credentialService.savedProfileURL
+                        try profData.write(to: profPath)
+                        let profInfo = try self.credentialService.importAndSaveProfile(from: profPath)
+                        self.profile = profInfo
+                        self.appendLog(LogMessage(level: .success, message: "Configured matching Wildcard Profile: \(profInfo.name)"))
+                    }
+                }
+
+                self.isPortalLoading = false
+            } catch {
+                self.isPortalLoading = false
+                self.appendLog(LogMessage(level: .error, message: "Failed to apply local identity: \(error.localizedDescription)"))
+                self.portalStatusMessage = "Failed to export certificate: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - CLI Engine Homebrew Installation

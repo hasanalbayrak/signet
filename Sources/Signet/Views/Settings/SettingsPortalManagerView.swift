@@ -310,6 +310,7 @@ extension SettingsView {
 
                 Button {
                     appState.refreshPortalCertificates()
+                    appState.refreshKeychainIdentities()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.clockwise")
@@ -410,22 +411,61 @@ extension SettingsView {
                     }
 
                     ForEach(appState.keychainIdentities) { identity in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(identity.name)
-                                    .font(.system(size: 11, weight: .medium))
-                                Text("Fingerprint: \(identity.id.prefix(16))...")
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .foregroundStyle(.secondary)
+                        let isCurrentTeam = (identity.teamId != nil && identity.teamId == appState.selectedTeam?.id) ||
+                                            (identity.teamName != nil && appState.selectedTeam != nil && (appState.selectedTeam!.name.localizedCaseInsensitiveContains(identity.teamName!) || identity.teamName!.localizedCaseInsensitiveContains(appState.selectedTeam!.name)))
+                        HStack(spacing: 12) {
+                            Image(systemName: "signature")
+                                .font(.system(size: 16))
+                                .foregroundStyle(isCurrentTeam ? Color.blue : Color.secondary)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(identity.name)
+                                        .font(.system(size: 11, weight: .semibold))
+                                    if isCurrentTeam {
+                                        Text("Matches Active Team")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.blue.opacity(0.15))
+                                            .foregroundStyle(Color.blue)
+                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    }
+                                }
+
+                                HStack(spacing: 6) {
+                                    if let tId = identity.teamId {
+                                        Text("Team ID: `\(tId)`")
+                                            .font(.system(size: 9, design: .monospaced))
+                                    }
+                                    if let tName = identity.teamName {
+                                        Text("• \(tName)")
+                                            .font(.system(size: 9))
+                                    }
+                                    Text("• Hash: \(identity.id.prefix(8))...")
+                                        .font(.system(size: 9, design: .monospaced))
+                                }
+                                .foregroundStyle(.secondary)
                             }
+
                             Spacer()
-                            Text("Ready in Keychain")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Color.green)
+
+                            Button {
+                                appState.useLocalKeychainIdentity(identity)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.seal.fill")
+                                    Text("Use This Certificate")
+                                }
+                                .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .tint(isCurrentTeam ? Color.accentColor : Color.secondary)
                         }
-                        .padding(8)
-                        .background(Color.green.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(10)
+                        .background(isCurrentTeam ? Color.blue.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
                 .padding(.top, 8)

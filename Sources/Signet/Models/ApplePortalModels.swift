@@ -93,10 +93,13 @@ public struct KeychainIdentity: Identifiable, Hashable, Sendable {
     public let id: String // SHA-1 fingerprint
     public let name: String
     public let teamId: String?
+    public let teamName: String?
 
-    public init(id: String, name: String, teamId: String? = nil) {
+    public init(id: String, name: String, teamId: String? = nil, teamName: String? = nil) {
         self.id = id
         self.name = name
         self.teamId = teamId
+        self.teamName = teamName
     }
 }
+

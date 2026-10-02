@@ -117,15 +117,22 @@ Signet/
 
 ## 🔐 Credentials Setup
 
-### Option 1: 1-Click Auto Provisioning (Recommended)
+### Option 1: Direct Apple ID Login with 2FA (Easiest)
 1. Open **Preferences** (Click ⚙️ in the top bar).
-2. Go to **Apple Developer Login** tab.
-3. Enter your **Key ID**, **Issuer ID**, and drop your **AuthKey_XXXXX.p8** file.
-   > *To generate an API key, go to [developer.apple.com](https://developer.apple.com) > App Store Connect > Users and Access > Integrations > Generate API Key (Role: Developer or Admin).*
-4. Click **Connect & Verify Account** and select your Developer Team.
-5. Click **1-Click Auto Provision (365 Days)**: Signet registers your connected iPhone, requests the certificate, creates a Wildcard profile, packages the `.p12`, and stores the password in Keychain!
+2. Go to **Apple ID (Direct + 2FA)** tab.
+3. Enter your **Apple ID Email** and **Password** -> Click **Sign In with Apple ID**.
+4. When prompted, enter the **6-digit 2FA verification code** sent to your iPhone/iPad/Mac.
+5. Select your **Developer Team** from the dropdown.
+6. Click **⚡ 1-Click Auto Provision (365 Days)**: Signet registers your connected iPhone, requests the development certificate from Apple, generates a Wildcard profile, packages the `.p12`, and stores credentials in macOS Keychain!
 
-### Option 2: Manual .p12 & Provisioning Profile
+### Option 2: App Store Connect API Key (.p8)
+1. Open **Preferences** > **API Key (.p8)** tab.
+2. Enter your **Key ID**, **Issuer ID**, and drop your **AuthKey_XXXXX.p8** file.
+   > *To generate an API key, visit [developer.apple.com](https://developer.apple.com) > App Store Connect > Users and Access > Integrations > Generate API Key.*
+3. Click **Connect & Verify API Key** and select your Team.
+4. Click **1-Click Auto Provision via API Key**.
+
+### Option 3: Manual .p12 & Provisioning Profile
 1. Open **Preferences** > **Manual (.p12 / Profile)** tab.
 2. Select your `.p12` file and enter your password.
 3. Select your `.mobileprovision` file.

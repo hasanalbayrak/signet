@@ -153,4 +153,24 @@ final class SignetTests: XCTestCase {
         XCTAssertEqual(decoded.selectedTeamName, "Hasan Team")
         XCTAssertEqual(decoded.sessionToken, "test_token_123")
     }
+
+    func testDeveloperMultipleTeamsParsingAndPersistence() throws {
+        let teams = [
+            DeveloperTeam(id: "COMP1234AA", name: "Company One Ltd", type: "Company/Organization", status: "active"),
+            DeveloperTeam(id: "COMP5678BB", name: "Company Two Inc", type: "Company/Organization", status: "active")
+        ]
+
+        XCTAssertEqual(teams.count, 2)
+        XCTAssertEqual(teams[0].displayTitle, "Company One Ltd (COMP1234AA)")
+        XCTAssertEqual(teams[1].displayTitle, "Company Two Inc (COMP5678BB)")
+
+        let data = try JSONEncoder().encode(teams)
+        let decoded = try JSONDecoder().decode([DeveloperTeam].self, from: data)
+
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0].id, "COMP1234AA")
+        XCTAssertEqual(decoded[1].id, "COMP5678BB")
+        XCTAssertEqual(decoded[0].type, "Company/Organization")
+        XCTAssertEqual(decoded[1].type, "Company/Organization")
+    }
 }

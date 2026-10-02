@@ -166,7 +166,10 @@ public final class AppleAuthService: @unchecked Sendable {
 
     // MARK: - WebKit Cookie Session Handling
 
-    public func handleWebCookies(cookies: [HTTPCookie]) async throws -> (session: AppleDeveloperSession, teams: [DeveloperTeam]) {
+    public func handleWebCookies(
+        cookies: [HTTPCookie],
+        preloadedTeams: [DeveloperTeam] = []
+    ) async throws -> (session: AppleDeveloperSession, teams: [DeveloperTeam]) {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.httpCookieAcceptPolicy = .always
         sessionConfig.httpShouldSetCookies = true
@@ -176,8 +179,25 @@ public final class AppleAuthService: @unchecked Sendable {
             sessionConfig.httpCookieStorage?.setCookie(cookie)
         }
 
-        let devSession = try await fetchOlympusSession(session: session, cookies: cookies, appleId: "Apple Developer Account")
-        let teams = try await fetchTeams(session: session, cookies: cookies)
+        var devSession = try await fetchOlympusSession(session: session, cookies: cookies, appleId: "Apple Developer Account")
+        var teams = try await fetchTeams(session: session, cookies: cookies)
+
+        // Merge any preloaded teams discovered in-page by WebKit
+        if !preloadedTeams.isEmpty {
+            var seenIds = Set(teams.map { $0.id })
+            for t in preloadedTeams {
+                if !seenIds.contains(t.id) {
+                    seenIds.insert(t.id)
+                    teams.append(t)
+                }
+            }
+        }
+
+        // Set default team if not already set
+        if devSession.selectedTeamId == nil, let firstTeam = teams.first {
+            devSession.selectedTeamId = firstTeam.id
+            devSession.selectedTeamName = firstTeam.name
+        }
 
         return (devSession, teams)
     }
@@ -193,6 +213,12 @@ public final class AppleAuthService: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("olympus-ui", forHTTPHeaderField: "X-Requested-With")
+
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        if !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         for cookie in cookies {
             session.configuration.httpCookieStorage?.setCookie(cookie)
@@ -247,39 +273,137 @@ public final class AppleAuthService: @unchecked Sendable {
         )
     }
 
-    public func fetchTeams(session: URLSession, cookies: [HTTPCookie]) async throws -> [DeveloperTeam] {
+    public func fetchDeveloperPortalTeams(session: URLSession, cookies: [HTTPCookie]) async -> [DeveloperTeam] {
+        let endpointUrls = [
+            "https://developer.apple.com/services-account/QH65B2/account/listTeams.action",
+            "https://developerservices2.apple.com/services/QH65B2/listTeams.action"
+        ]
+
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+
+        for urlString in endpointUrls {
+            guard let url = URL(string: urlString) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json, text/javascript, */*; q=0.01", forHTTPHeaderField: "Accept")
+            request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            request.setValue("https://developer.apple.com/account/", forHTTPHeaderField: "Referer")
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+
+            if !cookieHeader.isEmpty {
+                request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
+
+            for cookie in cookies {
+                session.configuration.httpCookieStorage?.setCookie(cookie)
+            }
+
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    continue
+                }
+
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
+                }
+
+                let teamsRaw = (json["teams"] as? [[String: Any]]) ?? (json["developerTeams"] as? [[String: Any]]) ?? []
+                var result: [DeveloperTeam] = []
+
+                for item in teamsRaw {
+                    let teamId = (item["teamId"] as? String) ?? (item["id"] as? String) ?? ""
+                    let name = (item["name"] as? String) ?? (item["teamName"] as? String) ?? "Apple Developer Team"
+                    let type = (item["type"] as? String) ?? "Company/Organization"
+                    let status = (item["status"] as? String) ?? "active"
+
+                    if !teamId.isEmpty {
+                        result.append(DeveloperTeam(id: teamId, name: name, type: type, status: status))
+                    }
+                }
+
+                if !result.isEmpty {
+                    return result
+                }
+            } catch {
+                continue
+            }
+        }
+
+        return []
+    }
+
+    public func fetchOlympusTeams(session: URLSession, cookies: [HTTPCookie]) async -> [DeveloperTeam] {
         let url = olympusBase.appendingPathComponent("session")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("olympus-ui", forHTTPHeaderField: "X-Requested-With")
+
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        if !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         for cookie in cookies {
             session.configuration.httpCookieStorage?.setCookie(cookie)
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 else {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 else {
+                return []
+            }
+
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let teamsArr = json["developerTeams"] as? [[String: Any]] else {
+                return []
+            }
+
+            var list: [DeveloperTeam] = []
+            for item in teamsArr {
+                let teamId = (item["teamId"] as? String) ?? (item["id"] as? String) ?? ""
+                let name = (item["name"] as? String) ?? "Apple Developer Team"
+                let type = (item["type"] as? String) ?? "Individual"
+                let status = (item["status"] as? String) ?? "Active"
+
+                if !teamId.isEmpty {
+                    list.append(DeveloperTeam(id: teamId, name: name, type: type, status: status))
+                }
+            }
+            return list
+        } catch {
             return []
         }
+    }
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let teamsArr = json["developerTeams"] as? [[String: Any]] else {
-            return []
-        }
+    public func fetchTeams(session: URLSession, cookies: [HTTPCookie]) async throws -> [DeveloperTeam] {
+        async let portalTeams = fetchDeveloperPortalTeams(session: session, cookies: cookies)
+        async let olympusTeams = fetchOlympusTeams(session: session, cookies: cookies)
 
-        var list: [DeveloperTeam] = []
-        for item in teamsArr {
-            let teamId = (item["teamId"] as? String) ?? (item["id"] as? String) ?? ""
-            let name = (item["name"] as? String) ?? "Apple Developer Team"
-            let type = (item["type"] as? String) ?? "Individual"
-            let status = (item["status"] as? String) ?? "Active"
+        let pTeams = await portalTeams
+        let oTeams = await olympusTeams
 
-            if !teamId.isEmpty {
-                list.append(DeveloperTeam(id: teamId, name: name, type: type, status: status))
+        var combined: [DeveloperTeam] = []
+        var seenIds = Set<String>()
+
+        // Prioritize Developer Portal teams (company/organization accuracy)
+        for t in pTeams {
+            if !seenIds.contains(t.id) {
+                seenIds.insert(t.id)
+                combined.append(t)
             }
         }
 
-        return list
+        for t in oTeams {
+            if !seenIds.contains(t.id) {
+                seenIds.insert(t.id)
+                combined.append(t)
+            }
+        }
+
+        return combined
     }
 
     // MARK: - Auto-Provisioning with Apple ID Session

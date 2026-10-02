@@ -326,7 +326,7 @@ public final class SignetAppState: ObservableObject {
         }
     }
 
-    public func handleWebLoginSuccess(cookies: [HTTPCookie]) {
+    public func handleWebLoginSuccess(cookies: [HTTPCookie], preloadedTeams: [DeveloperTeam] = []) {
         settingsInlineErrorMessage = nil
         isAppleIDSigningIn = true
         appendLog(LogMessage(level: .info, message: "Processing Apple WebKit login session..."))
@@ -334,14 +334,21 @@ public final class SignetAppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let (session, teams) = try await self.appleAuthService.handleWebCookies(cookies: cookies)
+                let (session, teams) = try await self.appleAuthService.handleWebCookies(cookies: cookies, preloadedTeams: preloadedTeams)
                 self.isAppleIDSigningIn = false
+                self.appleIDEmail = session.appleId
                 self.currentDeveloperSession = session
                 self.availableTeams = teams
                 self.selectedTeam = teams.first
                 self.settingsInlineErrorMessage = nil
                 self.saveAppleDeveloperSession(session)
-                self.appendLog(LogMessage(level: .success, message: "Logged in via Apple WebKit as \(session.userFullName) (\(teams.count) teams found)."))
+
+                if teams.isEmpty {
+                    self.appendLog(LogMessage(level: .warning, message: "Logged in as \(session.userFullName), but no developer teams were found. Try clicking 'Refresh Teams'."))
+                } else {
+                    let teamTitles = teams.map { $0.displayTitle }.joined(separator: ", ")
+                    self.appendLog(LogMessage(level: .success, message: "Logged in via Apple WebKit as \(session.userFullName) (\(teams.count) team(s) found: \(teamTitles))."))
+                }
             } catch {
                 self.isAppleIDSigningIn = false
                 self.showSettingsError("Failed to extract Apple Developer session: \(error.localizedDescription)")
@@ -402,6 +409,7 @@ public final class SignetAppState: ObservableObject {
         selectedTeam = nil
         credentialService.deletePasswordFromKeychain(account: "apple_developer_session")
         UserDefaults.standard.removeObject(forKey: "apple_id_email")
+        UserDefaults.standard.removeObject(forKey: "saved_developer_teams")
         appendLog(LogMessage(level: .info, message: "Signed out of Apple ID."))
     }
 
@@ -451,11 +459,53 @@ public final class SignetAppState: ObservableObject {
         }
     }
 
+    public func refreshAppleDeveloperTeams() {
+        guard let session = currentDeveloperSession else { return }
+        appendLog(LogMessage(level: .info, message: "Refreshing Apple Developer teams..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                var cookies: [HTTPCookie] = []
+                if let data = session.cookiesData,
+                   let unarchived = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, HTTPCookie.self], from: data) as? [HTTPCookie] {
+                    cookies = unarchived
+                }
+
+                let sessionConfig = URLSessionConfiguration.ephemeral
+                sessionConfig.httpCookieAcceptPolicy = .always
+                sessionConfig.httpShouldSetCookies = true
+                let urlSession = URLSession(configuration: sessionConfig)
+                for c in cookies {
+                    sessionConfig.httpCookieStorage?.setCookie(c)
+                }
+
+                let teams = try await self.appleAuthService.fetchTeams(session: urlSession, cookies: cookies)
+                if !teams.isEmpty {
+                    self.availableTeams = teams
+                    if self.selectedTeam == nil || !teams.contains(where: { $0.id == self.selectedTeam?.id }) {
+                        self.selectedTeam = teams.first
+                    }
+                    self.saveAppleDeveloperSession(session)
+                    let teamTitles = teams.map { $0.displayTitle }.joined(separator: ", ")
+                    self.appendLog(LogMessage(level: .success, message: "Discovered \(teams.count) developer team(s): \(teamTitles)"))
+                } else {
+                    self.appendLog(LogMessage(level: .warning, message: "No developer teams returned by Apple servers."))
+                }
+            } catch {
+                self.appendLog(LogMessage(level: .error, message: "Failed to refresh teams: \(error.localizedDescription)"))
+            }
+        }
+    }
+
     private func saveAppleDeveloperSession(_ session: AppleDeveloperSession) {
         UserDefaults.standard.set(session.appleId, forKey: "apple_id_email")
         if let data = try? JSONEncoder().encode(session),
            let str = String(data: data, encoding: .utf8) {
             try? credentialService.savePasswordToKeychain(str, account: "apple_developer_session")
+        }
+        if let teamsData = try? JSONEncoder().encode(availableTeams) {
+            UserDefaults.standard.set(teamsData, forKey: "saved_developer_teams")
         }
     }
 
@@ -465,7 +515,18 @@ public final class SignetAppState: ObservableObject {
            let data = jsonStr.data(using: .utf8),
            let session = try? JSONDecoder().decode(AppleDeveloperSession.self, from: data) {
             self.currentDeveloperSession = session
-            if let tId = session.selectedTeamId {
+
+            // Load saved teams from cache
+            if let teamsData = UserDefaults.standard.data(forKey: "saved_developer_teams"),
+               let savedTeams = try? JSONDecoder().decode([DeveloperTeam].self, from: teamsData),
+               !savedTeams.isEmpty {
+                self.availableTeams = savedTeams
+                if let tId = session.selectedTeamId, let match = savedTeams.first(where: { $0.id == tId }) {
+                    self.selectedTeam = match
+                } else {
+                    self.selectedTeam = savedTeams.first
+                }
+            } else if let tId = session.selectedTeamId {
                 self.availableTeams = [
                     DeveloperTeam(id: tId, name: session.selectedTeamName ?? "Apple Developer Team")
                 ]

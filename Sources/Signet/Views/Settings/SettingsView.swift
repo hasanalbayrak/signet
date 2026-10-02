@@ -283,20 +283,61 @@ public struct SettingsView: View {
 
             // Team Picker
             VStack(alignment: .leading, spacing: 8) {
-                Label("Developer Team", systemImage: "person.3.fill")
-                    .font(.system(size: 12, weight: .semibold))
+                HStack {
+                    Label("Developer Team", systemImage: "person.3.fill")
+                        .font(.system(size: 12, weight: .semibold))
+
+                    Spacer()
+
+                    Button {
+                        appState.refreshAppleDeveloperTeams()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Refresh Teams")
+                        }
+                        .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
 
                 if !appState.availableTeams.isEmpty {
                     Picker("Select Team:", selection: $appState.selectedTeam) {
                         ForEach(appState.availableTeams) { team in
-                            Text(team.displayTitle).tag(Optional(team))
+                            Text("\(team.name) (\(team.id)) • \(team.type)").tag(Optional(team))
                         }
                     }
                     .pickerStyle(.menu)
+
+                    if let selected = appState.selectedTeam {
+                        HStack(spacing: 6) {
+                            Image(systemName: selected.type.contains("Individual") ? "person.circle.fill" : "building.2.crop.circle.fill")
+                                .foregroundStyle(Color.accentColor)
+                            Text("Active: **\(selected.name)** • Team ID: `\(selected.id)` • \(selected.type)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 2)
+                    }
                 } else {
-                    Text("No developer teams discovered. Ensure your Apple ID has an active Developer Program membership.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No developer teams discovered yet.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            appState.refreshAppleDeveloperTeams()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Check for Teams Now")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
                 }
             }
             .padding(12)

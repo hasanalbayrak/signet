@@ -61,9 +61,9 @@ public struct AppleIDWebLoginView: View {
                 onWebViewCreated: { wv in
                     self.webView = wv
                 },
-                onAuthenticationComplete: { cookies in
+                onAuthenticationComplete: { cookies, discoveredTeams in
                     Task { @MainActor in
-                        appState.handleWebLoginSuccess(cookies: cookies)
+                        appState.handleWebLoginSuccess(cookies: cookies, preloadedTeams: discoveredTeams)
                         dismiss()
                     }
                 }
@@ -76,7 +76,7 @@ public struct AppleIDWebLoginView: View {
 private struct AppleWebViewRepresentable: NSViewRepresentable {
     @Binding var isLoading: Bool
     let onWebViewCreated: (WKWebView) -> Void
-    let onAuthenticationComplete: ([HTTPCookie]) -> Void
+    let onAuthenticationComplete: ([HTTPCookie], [DeveloperTeam]) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -160,7 +160,51 @@ private struct AppleWebViewRepresentable: NSViewRepresentable {
                     if let myacinfo = cookies.first(where: { $0.name == "myacinfo" }), !myacinfo.value.isEmpty {
                         self.hasCompleted = true
                         self.checkTimer?.invalidate()
-                        self.parent.onAuthenticationComplete(cookies)
+
+                        let fetchScript = """
+                        (async function() {
+                            try {
+                                let resp = await fetch('/services-account/QH65B2/account/listTeams.action', {
+                                    method: 'POST',
+                                    credentials: 'include',
+                                    headers: {
+                                        'Accept': 'application/json, text/javascript, */*',
+                                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    }
+                                });
+                                if (resp.ok) {
+                                    let data = await resp.json();
+                                    if (data && data.teams) {
+                                        return JSON.stringify(data.teams);
+                                    }
+                                }
+                            } catch(e) {}
+                            return "[]";
+                        })()
+                        """
+
+                        wv.evaluateJavaScript(fetchScript) { [weak self] result, _ in
+                            guard let self = self else { return }
+                            var discoveredTeams: [DeveloperTeam] = []
+                            if let jsonStr = result as? String,
+                               let data = jsonStr.data(using: .utf8),
+                               let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                                for item in array {
+                                    let id = (item["teamId"] as? String) ?? (item["id"] as? String) ?? ""
+                                    let name = (item["name"] as? String) ?? (item["teamName"] as? String) ?? "Apple Developer Team"
+                                    let type = (item["type"] as? String) ?? "Company/Organization"
+                                    let status = (item["status"] as? String) ?? "active"
+                                    if !id.isEmpty {
+                                        discoveredTeams.append(DeveloperTeam(id: id, name: name, type: type, status: status))
+                                    }
+                                }
+                            }
+
+                            DispatchQueue.main.async {
+                                self.parent.onAuthenticationComplete(cookies, discoveredTeams)
+                            }
+                        }
                     }
                 }
             }

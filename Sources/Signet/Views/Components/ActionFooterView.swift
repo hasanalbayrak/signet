@@ -68,7 +68,7 @@ public struct ActionFooterView: View {
             }
 
             // Bottom Buttons Bar
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 // Status hint on the left
                 HStack(spacing: 6) {
                     if appState.selectedIPA == nil {
@@ -77,22 +77,24 @@ public struct ActionFooterView: View {
                         Text("Drop an .ipa file to begin")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     } else if appState.certificate == nil {
                         Image(systemName: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
                         Text("Certificate required (click Configure)")
                             .font(.system(size: 12))
                             .foregroundStyle(.orange)
+                            .lineLimit(1)
                     } else {
                         Image(systemName: "checkmark.circle")
                             .foregroundStyle(.green)
                         Text("Ready to resign")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
-
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Sign IPA Only (Export)
                 Button {
@@ -114,17 +116,25 @@ public struct ActionFooterView: View {
                 Button {
                     appState.startSignAndInstall()
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Image(systemName: "bolt.fill")
-                        Text(appState.selectedDevice != nil ? "Sign & Install to \(appState.selectedDevice?.displayName ?? "Device")" : "Sign & Install")
+                        Text("Sign & Install")
+                        if let device = appState.selectedDevice {
+                            Text("(\(device.displayName))")
+                                .font(.system(size: 11, weight: .regular))
+                                .opacity(0.85)
+                                .lineLimit(1)
+                                .frame(maxWidth: 130)
+                                .truncationMode(.tail)
+                        }
                     }
                     .font(.system(size: 13, weight: .bold))
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 4)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(!appState.canStartSigning || appState.selectedDevice == nil)
-                .help("Signs the IPA and automatically deploys it to the selected iOS device via USB/Wi-Fi")
+                .help(appState.selectedDevice != nil ? "Signs the IPA and deploys it to \(appState.selectedDevice!.displayName)" : "Select a target device to sign and install")
             }
         }
     }

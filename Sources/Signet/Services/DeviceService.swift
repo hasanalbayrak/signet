@@ -335,13 +335,6 @@ public final class DeviceService: @unchecked Sendable {
 
     public func getLocalAppleSiliconMac() -> Device? {
         #if arch(arm64)
-        let isArm64 = true
-        #else
-        let isArm64 = false
-        #endif
-
-        guard isArm64 else { return nil }
-
         let uuid = getMacHardwareUUID() ?? "MAC-\(Host.current().localizedName ?? "LOCAL")"
         let (model, serial) = getMacHardwareModelAndSerial()
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
@@ -363,6 +356,9 @@ public final class DeviceService: @unchecked Sendable {
             buildVersion: buildVersion,
             isAppleSiliconMac: true
         )
+        #else
+        return nil
+        #endif
     }
 
     private func getMacHardwareUUID() -> String? {

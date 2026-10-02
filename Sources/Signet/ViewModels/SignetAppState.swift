@@ -37,11 +37,20 @@ public final class SignetAppState: ObservableObject {
     @Published public var showErrorAlert: Bool = false
     @Published public var alertErrorMessage: String = ""
 
-    // Apple Developer Auto-Provisioning
+    // Apple Developer Auto-Provisioning (API Key & Apple ID)
     @Published public var ascCredentials = AppStoreConnectCredentials(keyId: "", issuerId: "", privateKeyPem: "")
     @Published public var availableTeams: [DeveloperTeam] = []
     @Published public var selectedTeam: DeveloperTeam?
     @Published public var autoProvisioningStep: AutoProvisioningStep = .idle
+
+    // Direct Apple ID & 2FA State
+    @Published public var appleIDEmail: String = ""
+    @Published public var appleIDPassword: String = ""
+    @Published public var isAwaiting2FA: Bool = false
+    @Published public var twoFactorCode: String = ""
+    @Published public var twoFactorContext: Apple2FAContext? = nil
+    @Published public var currentDeveloperSession: AppleDeveloperSession? = nil
+    @Published public var isAppleIDSigningIn: Bool = false
 
     // MARK: - Dependencies
     private let credentialService = CredentialService.shared
@@ -50,6 +59,7 @@ public final class SignetAppState: ObservableObject {
     private let installerService = InstallerService.shared
     private let ipaManager = IPAManager.shared
     private let appleDeveloperService = AppleDeveloperService.shared
+    private let appleAuthService = AppleAuthService.shared
     public let binaryManager = BinaryManager.shared
 
     private var devicePollTask: Task<Void, Never>?
@@ -82,8 +92,9 @@ public final class SignetAppState: ObservableObject {
             appendLog(LogMessage(level: .info, message: "Loaded provisioning profile: \(prof.name) (\(prof.isWildcard ? "Wildcard" : "App Specific"))"))
         }
 
-        // 2. Load saved Apple Developer API credentials
+        // 2. Load saved Apple Developer API credentials & Apple ID session
         loadAscCredentials()
+        loadSavedAppleIDSession()
 
         // 3. Discover devices
         refreshDevices()
@@ -258,6 +269,176 @@ public final class SignetAppState: ObservableObject {
                 self.autoProvisioningStep = .failed(error: error.localizedDescription)
                 self.showError("Auto-provisioning failed: \(error.localizedDescription)")
                 self.appendLog(LogMessage(level: .error, message: "Auto-provisioning failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    // MARK: - Direct Apple ID & 2FA Flow
+
+    public func signInWithAppleID() {
+        guard !appleIDEmail.trimmingCharacters(in: .whitespaces).isEmpty,
+              !appleIDPassword.isEmpty else {
+            showError("Please enter your Apple ID email and password.")
+            return
+        }
+
+        isAppleIDSigningIn = true
+        appendLog(LogMessage(level: .info, message: "Authenticating '\(appleIDEmail)' with Apple ID servers..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let result = try await self.appleAuthService.signIn(
+                    appleId: self.appleIDEmail,
+                    password: self.appleIDPassword
+                )
+
+                self.isAppleIDSigningIn = false
+                switch result {
+                case .success(let session, let teams):
+                    self.currentDeveloperSession = session
+                    self.availableTeams = teams
+                    self.selectedTeam = teams.first
+                    self.isAwaiting2FA = false
+                    self.saveAppleDeveloperSession(session)
+                    self.appendLog(LogMessage(level: .success, message: "Logged in as \(session.userFullName) (\(teams.count) teams found)."))
+
+                case .requires2FA(let context):
+                    self.twoFactorContext = context
+                    self.isAwaiting2FA = true
+                    self.twoFactorCode = ""
+                    self.appendLog(LogMessage(level: .warning, message: "Two-Factor Authentication required. Check your Apple devices for the 6-digit code."))
+
+                case .failed(let message):
+                    self.showError(message)
+                    self.appendLog(LogMessage(level: .error, message: "Sign in failed: \(message)"))
+                }
+            } catch {
+                self.isAppleIDSigningIn = false
+                self.showError(error.localizedDescription)
+                self.appendLog(LogMessage(level: .error, message: "Apple ID Error: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    public func submitTwoFactorCode() {
+        guard let context = twoFactorContext else { return }
+        let code = twoFactorCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count >= 6 else {
+            showError("Please enter the complete 6-digit verification code.")
+            return
+        }
+
+        isAppleIDSigningIn = true
+        appendLog(LogMessage(level: .info, message: "Submitting 2FA verification code to Apple..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let (session, teams) = try await self.appleAuthService.verify2FA(
+                    code: code,
+                    context: context
+                )
+
+                self.isAppleIDSigningIn = false
+                self.isAwaiting2FA = false
+                self.twoFactorContext = nil
+                self.twoFactorCode = ""
+                self.currentDeveloperSession = session
+                self.availableTeams = teams
+                self.selectedTeam = teams.first
+                self.saveAppleDeveloperSession(session)
+                self.appendLog(LogMessage(level: .success, message: "2FA Verified! Welcome, \(session.userFullName)."))
+            } catch {
+                self.isAppleIDSigningIn = false
+                self.showError(error.localizedDescription)
+                self.appendLog(LogMessage(level: .error, message: "2FA Verification failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    public func cancelTwoFactor() {
+        isAwaiting2FA = false
+        twoFactorContext = nil
+        twoFactorCode = ""
+        isAppleIDSigningIn = false
+    }
+
+    public func signOutAppleID() {
+        currentDeveloperSession = nil
+        appleIDPassword = ""
+        availableTeams.removeAll()
+        selectedTeam = nil
+        credentialService.deletePasswordFromKeychain(account: "apple_developer_session")
+        UserDefaults.standard.removeObject(forKey: "apple_id_email")
+        appendLog(LogMessage(level: .info, message: "Signed out of Apple ID."))
+    }
+
+    public func startAutoProvisioningWithAppleID() {
+        guard let session = currentDeveloperSession else {
+            showError("Please sign in with your Apple ID first.")
+            return
+        }
+        guard let team = selectedTeam else {
+            showError("Please select an Apple Developer Team.")
+            return
+        }
+
+        appendLog(LogMessage(level: .info, message: "⚡ Starting 1-Click Apple ID Auto-Provisioning for \(team.name)..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let (cert, prof) = try await self.appleAuthService.autoProvisionWithSession(
+                    session: session,
+                    team: team,
+                    targetDevice: self.selectedDevice,
+                    onStep: { [weak self] step in
+                        Task { @MainActor in
+                            self?.autoProvisioningStep = step
+                        }
+                    },
+                    onLog: { [weak self] log in
+                        Task { @MainActor in
+                            self?.appendLog(log)
+                        }
+                    }
+                )
+
+                self.certificate = cert
+                self.profile = prof
+                if let pwd = self.credentialService.loadPasswordFromKeychain() {
+                    self.p12Password = pwd
+                }
+                self.showSettingsSheet = false
+                self.appendLog(LogMessage(level: .success, message: "✨ Auto-Provisioning Successful! App is ready to sign."))
+            } catch {
+                self.autoProvisioningStep = .failed(error: error.localizedDescription)
+                self.showError("Auto-provisioning failed: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "Auto-provisioning failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func saveAppleDeveloperSession(_ session: AppleDeveloperSession) {
+        UserDefaults.standard.set(session.appleId, forKey: "apple_id_email")
+        if let data = try? JSONEncoder().encode(session),
+           let str = String(data: data, encoding: .utf8) {
+            try? credentialService.savePasswordToKeychain(str, account: "apple_developer_session")
+        }
+    }
+
+    public func loadSavedAppleIDSession() {
+        self.appleIDEmail = UserDefaults.standard.string(forKey: "apple_id_email") ?? ""
+        if let jsonStr = credentialService.loadPasswordFromKeychain(account: "apple_developer_session"),
+           let data = jsonStr.data(using: .utf8),
+           let session = try? JSONDecoder().decode(AppleDeveloperSession.self, from: data) {
+            self.currentDeveloperSession = session
+            if let tId = session.selectedTeamId {
+                self.availableTeams = [
+                    DeveloperTeam(id: tId, name: session.selectedTeamName ?? "Apple Developer Team")
+                ]
+                self.selectedTeam = self.availableTeams.first
             }
         }
     }

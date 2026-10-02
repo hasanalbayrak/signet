@@ -134,4 +134,23 @@ final class SignetTests: XCTestCase {
         let team = DeveloperTeam(id: "ABC1234XYZ", name: "Hasan Albayrak", type: "Individual")
         XCTAssertEqual(team.displayTitle, "Hasan Albayrak (ABC1234XYZ)")
     }
+
+    func testAppleDeveloperSessionPersistence() throws {
+        let session = AppleDeveloperSession(
+            appleId: "developer@example.com",
+            userFullName: "Hasan Albayrak",
+            selectedTeamId: "ABC1234XYZ",
+            selectedTeamName: "Hasan Team",
+            sessionToken: "test_token_123"
+        )
+
+        let encoded = try JSONEncoder().encode(session)
+        let decoded = try JSONDecoder().decode(AppleDeveloperSession.self, from: encoded)
+
+        XCTAssertEqual(decoded.appleId, "developer@example.com")
+        XCTAssertEqual(decoded.userFullName, "Hasan Albayrak")
+        XCTAssertEqual(decoded.selectedTeamId, "ABC1234XYZ")
+        XCTAssertEqual(decoded.selectedTeamName, "Hasan Team")
+        XCTAssertEqual(decoded.sessionToken, "test_token_123")
+    }
 }

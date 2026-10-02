@@ -3,6 +3,7 @@ import SwiftUI
 public struct CertificatePasswordPromptView: View {
     @ObservedObject var appState: SignetAppState
     @State private var inputPassword: String = ""
+    @State private var isPasswordVisible: Bool = false
     @FocusState private var isFieldFocused: Bool
 
     public init(appState: SignetAppState) {
@@ -32,13 +33,43 @@ public struct CertificatePasswordPromptView: View {
                     .padding(.horizontal, 10)
             }
 
-            SecureField("Password", text: $inputPassword)
+            HStack(spacing: 6) {
+                Group {
+                    if isPasswordVisible {
+                        TextField("Password", text: $inputPassword)
+                    } else {
+                        SecureField("Password", text: $inputPassword)
+                    }
+                }
                 .textFieldStyle(.roundedBorder)
                 .focused($isFieldFocused)
-                .frame(maxWidth: 280)
                 .onSubmit {
                     submitPassword()
                 }
+
+                Button {
+                    isPasswordVisible.toggle()
+                } label: {
+                    Image(systemName: isPasswordVisible ? "eye.slash" : "eye")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isPasswordVisible ? "Hide password" : "Show password")
+
+                if !inputPassword.isEmpty {
+                    Button {
+                        inputPassword = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear password")
+                }
+            }
+            .frame(maxWidth: 290)
 
             HStack(spacing: 10) {
                 Button("Cancel") {
@@ -52,13 +83,18 @@ public struct CertificatePasswordPromptView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .disabled(inputPassword.isEmpty)
             }
         }
         .padding(24)
-        .frame(width: 360)
+        .frame(width: 380)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
-            self.inputPassword = appState.p12Password
+            if appState.passwordPromptMessage.localizedCaseInsensitiveContains("incorrect") || appState.passwordPromptMessage.localizedCaseInsensitiveContains("failed") {
+                self.inputPassword = ""
+            } else {
+                self.inputPassword = appState.p12Password
+            }
             self.isFieldFocused = true
         }
     }

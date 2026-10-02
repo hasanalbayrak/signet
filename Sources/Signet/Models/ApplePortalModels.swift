@@ -82,7 +82,8 @@ public struct PortalCertificate: Identifiable, Hashable, Codable, Sendable {
         type == "R58UK2EWSO" ||
         type == "9RQEK7MSXA" ||
         type == "HXZEUKP0FP" ||
-        type == "2PQI8IDXNH"
+        type == "2PQI8IDXNH" ||
+        type == "R5DG2F3R6A"
     }
 
     public var isTeamScoped: Bool {

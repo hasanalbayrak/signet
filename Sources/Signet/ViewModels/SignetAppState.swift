@@ -178,31 +178,32 @@ public final class SignetAppState: ObservableObject {
 
     public func promptForCertificatePassword(message: String? = nil) {
         self.passwordPromptMessage = message ?? "Please enter the password for your .p12 certificate:"
+        if message?.localizedCaseInsensitiveContains("incorrect") == true || message?.localizedCaseInsensitiveContains("failed") == true {
+            self.p12Password = ""
+            credentialService.deletePasswordFromKeychain()
+        }
         self.showPasswordPrompt = true
     }
 
     public func updateP12Password(_ newPassword: String) {
-        self.p12Password = newPassword
-        do {
-            try credentialService.savePasswordToKeychain(newPassword)
-            appendLog(LogMessage(level: .success, message: "Certificate password updated in Keychain."))
-        } catch {
-            appendLog(LogMessage(level: .warning, message: "Could not save password to Keychain: \(error.localizedDescription)"))
-        }
-
-        // Re-validate against saved .p12 if present
         let p12Path = credentialService.savedP12URL
         if FileManager.default.fileExists(atPath: p12Path.path) {
             do {
                 let cert = try credentialService.importAndSaveP12(from: p12Path, password: newPassword)
                 self.certificate = cert
+                self.p12Password = newPassword
+                try? credentialService.savePasswordToKeychain(newPassword)
                 self.showPasswordPrompt = false
                 appendLog(LogMessage(level: .success, message: "Certificate validated successfully with new password: \(cert.commonName)"))
             } catch {
+                self.p12Password = ""
+                credentialService.deletePasswordFromKeychain()
                 appendLog(LogMessage(level: .error, message: "Password validation failed: \(error.localizedDescription)"))
                 self.showError("The entered password could not unlock the certificate. Please verify your password.")
             }
         } else {
+            self.p12Password = newPassword
+            try? credentialService.savePasswordToKeychain(newPassword)
             self.showPasswordPrompt = false
         }
     }

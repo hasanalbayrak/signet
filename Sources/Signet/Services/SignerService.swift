@@ -143,7 +143,7 @@ public final class SignerService: @unchecked Sendable {
             let reason = state.lastErrorLine.isEmpty ? (result.output.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).last ?? "Process exited with code \(result.exitCode)") : state.lastErrorLine
             onLog?(LogMessage(level: .error, message: "Signing failed: \(reason)"))
             let lower = reason.lowercased()
-            if lower.contains("password") || lower.contains("pkcs12") || lower.contains("mac verify") || lower.contains("bad decrypt") {
+            if lower.contains("password") || lower.contains("pkcs12") || lower.contains("mac verify") || lower.contains("bad decrypt") || lower.contains("cant parse") || lower.contains("can't parse") || lower.contains("unsupported") || lower.contains("load certificate") || lower.contains("digital envelope") {
                 throw SigningError.invalidCertificatePassword(reason)
             }
             throw SigningError.signingFailed(reason)

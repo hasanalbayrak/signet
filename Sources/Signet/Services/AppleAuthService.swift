@@ -1423,79 +1423,144 @@ public final class AppleAuthService: @unchecked Sendable {
             }
         }
 
-        // 2. Secondary: Legacy iOS endpoint with verified safe iOS types
-        // Types: Apple Development, iOS Development, iOS Distribution, Apple Distribution, etc. (NO Mac types)
+        // 2. Query targeted certificate types individually to prevent Apache Struts enum validation errors (resultCode 25)
         var legacyRawCerts: [[String: Any]] = []
 
-        let safeIosTypes = "83Q87W3TGH,WXV89964HE,5QPB9NHCEI,5QPB9NHCEQ,R58UK2EWSO,R5DG2F3R6A,9RQEK7MSXA,B73J52Q545,LH4T963KP2,92Y3FF6462"
+        let targetIosTypes: [(code: String, label: String)] = [
+            ("WXV89964HE", "Apple Distribution"),
+            ("R58UK2EWSO", "iOS Distribution"),
+            ("R5DG2F3R6A", "iOS Distribution (Classic)"),
+            ("9RQEK7MSXA", "iOS In-House Distribution"),
+            ("83Q87W3TGH", "Apple Development"),
+            ("5QPB9NHCEI", "iOS Development"),
+            ("5QPB9NHCEQ", "iOS Development (Extended)")
+        ]
+
         let iosListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/certificate/listCertRequests.action")!
-        let iosParams = [
+
+        // 2a. Try listing all certificates without types filter first
+        let allParams = [
             "teamId": team.id,
             "pageNumber": "1",
             "pageSize": "500",
-            "sort": "certRequestStatusCode=asc",
-            "types": safeIosTypes
+            "sort": "certRequestStatusCode=asc"
         ]
-        let iosReq = makePortalRequest(url: iosListURL, method: "POST", bodyParams: iosParams, cookies: cookies, urlSession: urlSession)
-        do {
-            let res = try await executePortalRequest(iosReq, session: urlSession, operationName: "ios/listCertRequests.action", onLog: onLog)
-            if res.response.statusCode == 200, let dict = res.json {
-                if let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
-                    legacyRawCerts.append(contentsOf: certs)
-                    onLog?(LogMessage(level: .info, message: "[Portal] iOS cert endpoint returned \(certs.count) certificate(s)."))
+        let allReq = makePortalRequest(url: iosListURL, method: "POST", bodyParams: allParams, cookies: cookies, urlSession: urlSession)
+        if let res = try? await executePortalRequest(allReq, session: urlSession, operationName: "ios/listCertRequests.action (all)", onLog: onLog),
+           res.response.statusCode == 200, let dict = res.json,
+           let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
+            for c in certs {
+                let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
+                if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
+                    legacyRawCerts.append(c)
                 }
             }
-        } catch {
-            onLog?(LogMessage(level: .warning, message: "[Portal] ios/listCertRequests failed: \(error.localizedDescription)"))
+            onLog?(LogMessage(level: .info, message: "[Portal] iOS cert endpoint (all) returned \(certs.count) certificate(s)."))
         }
 
-        // 3. Legacy Mac endpoint with verified safe Mac types (Mac Development, Mac Distribution and Developer ID)
-        let safeMacTypes = "749Y1QAGU7,HXZEUKP0FP,2PQI8IDXNH,W0EURJRMC5,DIVN2GW3XT,OYVN2GW35E"
-        let macListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/mac/certificate/listCertRequests.action")!
-        let macParams = [
-            "teamId": team.id,
-            "pageNumber": "1",
-            "pageSize": "500",
-            "sort": "certRequestStatusCode=asc",
-            "types": safeMacTypes
-        ]
-        let macReq = makePortalRequest(url: macListURL, method: "POST", bodyParams: macParams, cookies: cookies, urlSession: urlSession)
-        do {
-            let res = try await executePortalRequest(macReq, session: urlSession, operationName: "mac/listCertRequests.action", onLog: onLog)
-            if res.response.statusCode == 200, let dict = res.json,
-               let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]) {
-                legacyRawCerts.append(contentsOf: certs)
-                onLog?(LogMessage(level: .info, message: "[Portal] Mac cert endpoint returned \(certs.count) certificate(s)."))
-            }
-        } catch {
-            onLog?(LogMessage(level: .verbose, message: "[Portal] mac/listCertRequests failed: \(error.localizedDescription)"))
-        }
-
-        // 4. Xcode developer services endpoint fallback (proven reliable for Apple Development & Distribution)
-        if legacyRawCerts.isEmpty && accumulatedCerts.isEmpty {
-            onLog?(LogMessage(level: .info, message: "[Portal] Querying Xcode developer services endpoints..."))
-            
-            // 4a. Development certs
-            let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listAllDevelopmentCerts.action")!
-            let xcReq = makeXcodePlistRequest(url: xcURL, params: ["teamId": team.id], cookies: cookies)
-            if let res = try? await executePortalRequest(xcReq, session: urlSession, operationName: "developerservices2/listAllDevelopmentCerts.action", onLog: onLog),
+        // 2b. Query each specific iOS & Universal certificate type individually
+        for item in targetIosTypes {
+            let params = [
+                "teamId": team.id,
+                "pageNumber": "1",
+                "pageSize": "500",
+                "sort": "certRequestStatusCode=asc",
+                "types": item.code
+            ]
+            let req = makePortalRequest(url: iosListURL, method: "POST", bodyParams: params, cookies: cookies, urlSession: urlSession)
+            if let res = try? await executePortalRequest(req, session: urlSession, operationName: "ios/listCertRequests.action (\(item.label))", onLog: onLog),
                res.response.statusCode == 200, let dict = res.json,
-               let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]) {
-                legacyRawCerts.append(contentsOf: certs)
-                onLog?(LogMessage(level: .info, message: "[Portal] Xcode development endpoint returned \(certs.count) certificate(s)."))
+               let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
+                var added = 0
+                for c in certs {
+                    let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
+                    if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
+                        legacyRawCerts.append(c)
+                        added += 1
+                    }
+                }
+                if added > 0 {
+                    onLog?(LogMessage(level: .info, message: "[Portal] Retrieved \(added) \(item.label) certificate(s)."))
+                }
             }
+        }
 
-            // 4b. All cert requests including distribution
+        // 3. Legacy Mac endpoint with individual safe Mac types (Mac Development, Mac App Distribution, Developer ID)
+        let targetMacTypes: [(code: String, label: String)] = [
+            ("W0EURJRMC5", "Developer ID Application"),
+            ("HXZEUKP0FP", "Mac App Distribution"),
+            ("2PQI8IDXNH", "Mac Installer Distribution"),
+            ("749Y1QAGU7", "Mac Development"),
+            ("DIVN2GW3XT", "Developer ID Application (Universal)"),
+            ("OYVN2GW35E", "Developer ID Installer")
+        ]
+
+        let macListURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/mac/certificate/listCertRequests.action")!
+        for item in targetMacTypes {
+            let macParams = [
+                "teamId": team.id,
+                "pageNumber": "1",
+                "pageSize": "500",
+                "sort": "certRequestStatusCode=asc",
+                "types": item.code
+            ]
+            let macReq = makePortalRequest(url: macListURL, method: "POST", bodyParams: macParams, cookies: cookies, urlSession: urlSession)
+            if let res = try? await executePortalRequest(macReq, session: urlSession, operationName: "mac/listCertRequests.action (\(item.label))", onLog: onLog),
+               res.response.statusCode == 200, let dict = res.json,
+               let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
+                var added = 0
+                for c in certs {
+                    let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
+                    if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
+                        legacyRawCerts.append(c)
+                        added += 1
+                    }
+                }
+                if added > 0 {
+                    onLog?(LogMessage(level: .info, message: "[Portal] Mac endpoint returned \(added) \(item.label) certificate(s)."))
+                }
+            }
+        }
+
+        // 4. Xcode developer services endpoints (always query to guarantee coverage)
+        onLog?(LogMessage(level: .info, message: "[Portal] Checking Xcode developer services endpoints..."))
+
+        // 4a. Development certs
+        let xcURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listAllDevelopmentCerts.action")!
+        let xcReq = makeXcodePlistRequest(url: xcURL, params: ["teamId": team.id], cookies: cookies)
+        if let res = try? await executePortalRequest(xcReq, session: urlSession, operationName: "developerservices2/listAllDevelopmentCerts.action", onLog: onLog),
+           res.response.statusCode == 200, let dict = res.json,
+           let certs = (dict["certRequests"] as? [[String: Any]]) ?? (dict["certificates"] as? [[String: Any]]), !certs.isEmpty {
+            var added = 0
+            for c in certs {
+                let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
+                if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
+                    legacyRawCerts.append(c)
+                    added += 1
+                }
+            }
+            if added > 0 {
+                onLog?(LogMessage(level: .info, message: "[Portal] Xcode development endpoint returned \(added) certificate(s)."))
+            }
+        }
+
+        // 4b. Xcode distribution cert requests
+        for item in targetIosTypes.filter({ $0.label.contains("Distribution") }) {
             let xcListURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listCertRequests.action")!
-            let xcListReq = makeXcodePlistRequest(url: xcListURL, params: ["teamId": team.id, "types": safeIosTypes], cookies: cookies)
-            if let resList = try? await executePortalRequest(xcListReq, session: urlSession, operationName: "developerservices2/listCertRequests.action", onLog: onLog),
+            let xcListReq = makeXcodePlistRequest(url: xcListURL, params: ["teamId": team.id, "types": item.code], cookies: cookies)
+            if let resList = try? await executePortalRequest(xcListReq, session: urlSession, operationName: "developerservices2/listCertRequests.action (\(item.label))", onLog: onLog),
                resList.response.statusCode == 200, let dictList = resList.json,
-               let certsList = (dictList["certRequests"] as? [[String: Any]]) ?? (dictList["certificates"] as? [[String: Any]]) {
+               let certsList = (dictList["certRequests"] as? [[String: Any]]) ?? (dictList["certificates"] as? [[String: Any]]), !certsList.isEmpty {
+                var added = 0
                 for c in certsList {
                     let cId = (c["certificateId"] as? String) ?? (c["certRequestId"] as? String) ?? ""
                     if !cId.isEmpty && !legacyRawCerts.contains(where: { (($0["certificateId"] as? String) ?? ($0["certRequestId"] as? String)) == cId }) {
                         legacyRawCerts.append(c)
+                        added += 1
                     }
+                }
+                if added > 0 {
+                    onLog?(LogMessage(level: .info, message: "[Portal] Xcode services returned \(added) \(item.label) certificate(s)."))
                 }
             }
         }

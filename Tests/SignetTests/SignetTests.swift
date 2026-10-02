@@ -322,5 +322,29 @@ final class SignetTests: XCTestCase {
         )
         XCTAssertTrue(iosDistCert.isDistribution)
         XCTAssertTrue(iosDistCert.isTeamScoped)
+
+        let storeDistCert = PortalCertificate(
+            id: "CERT_STORE_DIST",
+            name: "iOS Distribution: Team Store",
+            type: "R58UK2EWSO",
+            typeDisplayName: "iOS Distribution",
+            status: "Issued",
+            ownerName: "Team Store",
+            ownerType: "team"
+        )
+        XCTAssertTrue(storeDistCert.isDistribution)
+        XCTAssertTrue(storeDistCert.isTeamScoped)
+
+        let inHouseCert = PortalCertificate(
+            id: "CERT_INHOUSE",
+            name: "Enterprise Distribution: Team Corp",
+            type: "9RQEK7MSXA",
+            typeDisplayName: "iOS Distribution (In-House)",
+            status: "Issued",
+            ownerName: "Team Corp",
+            ownerType: "team"
+        )
+        XCTAssertTrue(inHouseCert.isDistribution)
+        XCTAssertTrue(inHouseCert.isTeamScoped)
     }
 }

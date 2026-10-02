@@ -128,13 +128,17 @@ public final class CredentialService: @unchecked Sendable {
         return info
     }
 
-    private var opensslBinaryURL: URL {
+    private var availableOpenSSLURLs: [URL] {
+        var urls: [URL] = []
         for path in ["/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl"] {
             if fileManager.fileExists(atPath: path) {
-                return URL(fileURLWithPath: path)
+                urls.append(URL(fileURLWithPath: path))
             }
         }
-        return URL(fileURLWithPath: "/usr/bin/openssl")
+        if urls.isEmpty {
+            urls.append(URL(fileURLWithPath: "/usr/bin/openssl"))
+        }
+        return urls
     }
 
     private func tryOpenSSLReencode(data: Data, password: String) -> Data? {
@@ -146,56 +150,76 @@ public final class CredentialService: @unchecked Sendable {
         let pemPath = tempDir.appendingPathComponent("temp.pem")
         let outP12 = tempDir.appendingPathComponent("converted.p12")
 
-        let binURL = opensslBinaryURL
-        let isOpenSSL3 = binURL.path.contains("homebrew") || binURL.path.contains("local")
-
         do {
             try data.write(to: inP12)
 
-            // Step 1: Verify password and extract key & cert to PEM using OpenSSL
-            let process1 = Process()
-            process1.executableURL = binURL
-            process1.arguments = ["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path]
-            let pipe1 = Pipe()
-            process1.standardError = pipe1
-            process1.standardOutput = pipe1
-            try process1.run()
-            process1.waitUntilExit()
+            for binURL in availableOpenSSLURLs {
+                let isOpenSSL3 = binURL.path.contains("homebrew") || binURL.path.contains("local")
 
-            guard process1.terminationStatus == 0, fileManager.fileExists(atPath: pemPath.path) else {
-                return nil
+                // Step 1: Verify password and extract key & cert to PEM using OpenSSL
+                // OpenSSL 3 requires -legacy for older PKCS#12 algorithms (RC2, 3DES, PBES1)
+                var extractAttempts: [[String]] = []
+                if isOpenSSL3 {
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-legacy", "-out", pemPath.path])
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path])
+                } else {
+                    extractAttempts.append(["pkcs12", "-in", inP12.path, "-passin", "pass:\(password)", "-nodes", "-out", pemPath.path])
+                }
+
+                var extracted = false
+                for args in extractAttempts {
+                    if fileManager.fileExists(atPath: pemPath.path) {
+                        try? fileManager.removeItem(at: pemPath)
+                    }
+                    let process1 = Process()
+                    process1.executableURL = binURL
+                    process1.arguments = args
+                    let pipe1 = Pipe()
+                    process1.standardError = pipe1
+                    process1.standardOutput = pipe1
+                    try? process1.run()
+                    process1.waitUntilExit()
+
+                    if process1.terminationStatus == 0, fileManager.fileExists(atPath: pemPath.path) {
+                        extracted = true
+                        break
+                    }
+                }
+
+                guard extracted, fileManager.fileExists(atPath: pemPath.path) else {
+                    continue
+                }
+
+                // Step 2: Re-export into Apple Security framework compatible standard 3DES PKCS#12
+                // If OpenSSL 3, use -legacy to force 3DES_CBC which Apple's SecPKCS12Import and zsign require
+                var exportAttempts: [[String]] = []
+                if isOpenSSL3 {
+                    exportAttempts.append(["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)", "-legacy"])
+                    exportAttempts.append(["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"])
+                } else {
+                    exportAttempts.append(["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"])
+                }
+
+                for exportArgs in exportAttempts {
+                    if fileManager.fileExists(atPath: outP12.path) {
+                        try? fileManager.removeItem(at: outP12)
+                    }
+                    let process2 = Process()
+                    process2.executableURL = binURL
+                    process2.arguments = exportArgs
+                    let pipe2 = Pipe()
+                    process2.standardError = pipe2
+                    process2.standardOutput = pipe2
+                    try? process2.run()
+                    process2.waitUntilExit()
+
+                    if process2.terminationStatus == 0, fileManager.fileExists(atPath: outP12.path),
+                       let convertedData = try? Data(contentsOf: outP12), !convertedData.isEmpty {
+                        return convertedData
+                    }
+                }
             }
-
-            // Step 2: Re-export into Apple Security framework compatible standard 3DES PKCS#12
-            // If OpenSSL 3, use -legacy to force 3DES_CBC which Apple's SecPKCS12Import and zsign require
-            var exportArgs = ["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"]
-            if isOpenSSL3 {
-                exportArgs.append("-legacy")
-            }
-
-            let process2 = Process()
-            process2.executableURL = binURL
-            process2.arguments = exportArgs
-            let pipe2 = Pipe()
-            process2.standardError = pipe2
-            process2.standardOutput = pipe2
-            try process2.run()
-            process2.waitUntilExit()
-
-            if process2.terminationStatus != 0 && isOpenSSL3 {
-                // Fallback without -legacy if failed
-                let processFallback = Process()
-                processFallback.executableURL = binURL
-                processFallback.arguments = ["pkcs12", "-export", "-in", pemPath.path, "-out", outP12.path, "-passout", "pass:\(password)"]
-                try? processFallback.run()
-                processFallback.waitUntilExit()
-            }
-
-            guard fileManager.fileExists(atPath: outP12.path), let convertedData = try? Data(contentsOf: outP12), !convertedData.isEmpty else {
-                return nil
-            }
-
-            return convertedData
+            return nil
         } catch {
             return nil
         }

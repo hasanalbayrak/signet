@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Signet
 
 final class SignetTests: XCTestCase {
@@ -93,5 +94,44 @@ final class SignetTests: XCTestCase {
         // At least zsign should be discovered in Resources or path
         let zsignInfo = report.first { $0.name.contains("zsign") }
         XCTAssertNotNil(zsignInfo)
+    }
+
+    func testAppStoreConnectJWTSigning() throws {
+        // Generate a test P256 key
+        let testKey = CryptoKit.P256.Signing.PrivateKey()
+        let pemString = testKey.pemRepresentation
+
+        let creds = AppStoreConnectCredentials(
+            keyId: "TESTKEY123",
+            issuerId: "57246542-96fe-1a63-e053-0824d011072a",
+            privateKeyPem: pemString
+        )
+
+        XCTAssertTrue(creds.isValid)
+
+        let jwt = try AppleDeveloperService.shared.generateJWT(credentials: creds)
+        let parts = jwt.components(separatedBy: ".")
+        XCTAssertEqual(parts.count, 3, "JWT must consist of header, payload, and signature")
+
+        // Validate Header contains ES256 and kid
+        var headerB64 = parts[0]
+        while headerB64.count % 4 != 0 { headerB64.append("=") }
+        let headerData = try XCTUnwrap(Data(base64Encoded: headerB64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")))
+        let headerJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: headerData) as? [String: Any])
+        XCTAssertEqual(headerJSON["alg"] as? String, "ES256")
+        XCTAssertEqual(headerJSON["kid"] as? String, "TESTKEY123")
+
+        // Validate Payload contains issuer and audience
+        var payloadB64 = parts[1]
+        while payloadB64.count % 4 != 0 { payloadB64.append("=") }
+        let payloadData = try XCTUnwrap(Data(base64Encoded: payloadB64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")))
+        let payloadJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: payloadData) as? [String: Any])
+        XCTAssertEqual(payloadJSON["iss"] as? String, "57246542-96fe-1a63-e053-0824d011072a")
+        XCTAssertEqual(payloadJSON["aud"] as? String, "appstoreconnect-v1")
+    }
+
+    func testDeveloperTeamDisplay() {
+        let team = DeveloperTeam(id: "ABC1234XYZ", name: "Hasan Albayrak", type: "Individual")
+        XCTAssertEqual(team.displayTitle, "Hasan Albayrak (ABC1234XYZ)")
     }
 }

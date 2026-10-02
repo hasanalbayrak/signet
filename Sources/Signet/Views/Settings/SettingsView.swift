@@ -5,11 +5,25 @@ public struct SettingsView: View {
     @ObservedObject var appState: SignetAppState
     @Environment(\.dismiss) private var dismiss
 
+    public enum SettingsTab: String, CaseIterable, Identifiable {
+        case autoProvision = "Apple Developer Login"
+        case manualFiles = "Manual (.p12 / Profile)"
+        case engines = "CLI Engines"
+        public var id: String { rawValue }
+    }
+
+    @State private var selectedTab: SettingsTab = .autoProvision
+
+    // Manual state
     @State private var selectedP12URL: URL?
     @State private var inputPassword: String = ""
     @State private var selectedProfileURL: URL?
-    @State private var statusReport: [BinaryManager.BinaryInfo] = []
     @State private var importErrorMessage: String?
+
+    // Auto-provision state
+    @State private var selectedP8URL: URL?
+    @State private var p8FileLoaded: Bool = false
+    @State private var statusReport: [BinaryManager.BinaryInfo] = []
 
     public init(appState: SignetAppState) {
         self.appState = appState
@@ -22,7 +36,7 @@ public struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Signet Preferences")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Manage signing credentials, provisioning profiles and CLI engines")
+                    Text("Manage signing credentials, Apple Developer Accounts and CLI engines")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -36,30 +50,274 @@ public struct SettingsView: View {
             .padding(16)
             .background(Color(nsColor: .windowBackgroundColor))
 
+            // Tab Selector
+            Picker("Mode", selection: $selectedTab) {
+                ForEach(SettingsTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+
             Divider()
 
             ScrollView {
-                VStack(spacing: 20) {
-                    // Section A: Certificate (.p12)
-                    certificateSection()
-
-                    // Section B: Provisioning Profile (.mobileprovision)
-                    profileSection()
-
-                    // Section C: System CLI Tools & Engines
-                    cliToolsSection()
+                VStack(spacing: 18) {
+                    switch selectedTab {
+                    case .autoProvision:
+                        autoProvisionSection()
+                    case .manualFiles:
+                        manualFilesSection()
+                    case .engines:
+                        cliToolsSection()
+                    }
                 }
                 .padding(20)
             }
         }
-        .frame(width: 580, height: 600)
+        .frame(width: 620, height: 620)
         .onAppear {
             self.inputPassword = appState.p12Password
             self.statusReport = appState.binaryManager.getStatusReport()
+            if !appState.ascCredentials.privateKeyPem.isEmpty {
+                self.p8FileLoaded = true
+            }
         }
     }
 
-    // MARK: - Certificate Section
+    // MARK: - Auto-Provisioning (Apple Developer API)
+
+    @ViewBuilder
+    private func autoProvisionSection() -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Feature Banner
+            HStack(spacing: 12) {
+                Image(systemName: "apple.logo")
+                    .font(.system(size: 26))
+                    .foregroundStyle(Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Zero-Friction Apple Developer Auto-Provisioning")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("No manual .p12 export, no 2FA interruptions, and no third-party anisette servers. Uses your official App Store Connect API Key to generate 365-day certificates and profiles.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(Color.accentColor.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            // Active Certificate Badge if present
+            if let cert = appState.certificate {
+                HStack {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(Color.green)
+                        .font(.system(size: 18))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Active Certificate: \(cert.teamName)")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Team ID: \(cert.teamId) • \(cert.validityStatusText)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if let prof = appState.profile {
+                        Text(prof.isWildcard ? "Wildcard (*)" : "App Specific")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15))
+                            .foregroundStyle(Color.blue)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(10)
+                .background(Color.green.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            // Step 1: App Store Connect API Credentials
+            VStack(alignment: .leading, spacing: 10) {
+                Label("App Store Connect API Key", systemImage: "key.horizontal.fill")
+                    .font(.system(size: 12, weight: .semibold))
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Key ID:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+
+                        TextField("e.g. 2X9R427NDK", text: $appState.ascCredentials.keyId)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                    }
+
+                    GridRow {
+                        Text("Issuer ID:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+
+                        TextField("e.g. 57246542-96fe-1a63-e053-0824d011072a", text: $appState.ascCredentials.issuerId)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                    }
+
+                    GridRow {
+                        Text("Private Key:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+
+                        HStack {
+                            Button {
+                                browseForP8()
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "doc.badge.plus")
+                                    Text(p8FileLoaded ? "Private Key Loaded (.p8)" : "Select AuthKey_XXXXX.p8 File")
+                                }
+                                .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+
+                            if p8FileLoaded {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(Color.green)
+                                    .font(.system(size: 13))
+                            }
+
+                            Spacer()
+                        }
+                    }
+                }
+
+                HStack {
+                    Spacer()
+                    Button {
+                        appState.fetchAppleDeveloperTeams()
+                    } label: {
+                        HStack(spacing: 5) {
+                            if appState.autoProvisioningStep == .fetchingTeams {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "link")
+                            }
+                            Text("Connect & Verify Account")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(appState.autoProvisioningStep.isBusy || !appState.ascCredentials.isValid)
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            // Step 2: Team Selection & Auto-Provision Execution
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Developer Team & Provisioning", systemImage: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 12, weight: .semibold))
+
+                if !appState.availableTeams.isEmpty {
+                    HStack {
+                        Text("Select Team:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+
+                        Picker("", selection: $appState.selectedTeam) {
+                            ForEach(appState.availableTeams) { team in
+                                Text(team.displayTitle).tag(Optional(team))
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Spacer()
+                    }
+                }
+
+                // Target Device Notice
+                HStack(spacing: 8) {
+                    Image(systemName: appState.selectedDevice?.deviceIconName ?? "iphone")
+                        .foregroundStyle(Color.accentColor)
+
+                    if let dev = appState.selectedDevice {
+                        Text("Target Device: **\(dev.displayName)** will be auto-registered in Apple Developer Portal.")
+                            .font(.system(size: 11))
+                    } else {
+                        Text("No iOS device currently selected. Will generate profile for all registered team devices.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                // Auto-Provision Action Button
+                VStack(spacing: 8) {
+                    Button {
+                        appState.startAutoProvisioning()
+                    } label: {
+                        HStack(spacing: 8) {
+                            if appState.autoProvisioningStep.isBusy {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "bolt.badge.automatic.fill")
+                            }
+                            Text(appState.autoProvisioningStep.isBusy ? appState.autoProvisioningStep.message : "1-Click Auto Provision (365 Days)")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(appState.autoProvisioningStep.isBusy || !appState.ascCredentials.isValid)
+
+                    if appState.autoProvisioningStep.isBusy {
+                        Text(appState.autoProvisioningStep.message)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            // Guidance & Documentation
+            VStack(alignment: .leading, spacing: 4) {
+                Text("How to get your App Store Connect API Key:")
+                    .font(.system(size: 11, weight: .bold))
+                Text("1. Visit developer.apple.com > **App Store Connect** > **Users and Access** > **Integrations**.\n2. Under **App Store Connect API**, click **Generate API Key** (Role: Developer or Admin).\n3. Copy the **Key ID**, **Issuer ID**, and download the **.p8** file.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    // MARK: - Manual Files Section
+
+    @ViewBuilder
+    private func manualFilesSection() -> some View {
+        VStack(spacing: 16) {
+            certificateSection()
+            profileSection()
+        }
+    }
 
     @ViewBuilder
     private func certificateSection() -> some View {
@@ -126,8 +384,6 @@ public struct SettingsView: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
-
-    // MARK: - Provisioning Profile Section
 
     @ViewBuilder
     private func profileSection() -> some View {
@@ -241,6 +497,25 @@ public struct SettingsView: View {
     }
 
     // MARK: - File Browsers
+
+    private func browseForP8() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "p8") ?? .data,
+            UTType(filenameExtension: "txt") ?? .plainText
+        ]
+        panel.prompt = "Select .p8 Key"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            self.selectedP8URL = url
+            if let content = try? String(contentsOf: url, encoding: .utf8) {
+                appState.ascCredentials.privateKeyPem = content
+                self.p8FileLoaded = true
+            }
+        }
+    }
 
     private func browseForP12() {
         let panel = NSOpenPanel()

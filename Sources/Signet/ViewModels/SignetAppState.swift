@@ -37,12 +37,19 @@ public final class SignetAppState: ObservableObject {
     @Published public var showErrorAlert: Bool = false
     @Published public var alertErrorMessage: String = ""
 
+    // Apple Developer Auto-Provisioning
+    @Published public var ascCredentials = AppStoreConnectCredentials(keyId: "", issuerId: "", privateKeyPem: "")
+    @Published public var availableTeams: [DeveloperTeam] = []
+    @Published public var selectedTeam: DeveloperTeam?
+    @Published public var autoProvisioningStep: AutoProvisioningStep = .idle
+
     // MARK: - Dependencies
     private let credentialService = CredentialService.shared
     private let deviceService = DeviceService.shared
     private let signerService = SignerService.shared
     private let installerService = InstallerService.shared
     private let ipaManager = IPAManager.shared
+    private let appleDeveloperService = AppleDeveloperService.shared
     public let binaryManager = BinaryManager.shared
 
     private var devicePollTask: Task<Void, Never>?
@@ -75,7 +82,10 @@ public final class SignetAppState: ObservableObject {
             appendLog(LogMessage(level: .info, message: "Loaded provisioning profile: \(prof.name) (\(prof.isWildcard ? "Wildcard" : "App Specific"))"))
         }
 
-        // 2. Discover devices
+        // 2. Load saved Apple Developer API credentials
+        loadAscCredentials()
+
+        // 3. Discover devices
         refreshDevices()
 
         // 3. Check binary availability
@@ -147,6 +157,109 @@ public final class SignetAppState: ObservableObject {
         profile = nil
         p12Password = ""
         appendLog(LogMessage(level: .info, message: "Cleared saved credentials and certificates."))
+    }
+
+    // MARK: - Apple Developer Auto-Provisioning
+
+    public func saveAscCredentials() {
+        UserDefaults.standard.set(ascCredentials.keyId, forKey: "asc_key_id")
+        UserDefaults.standard.set(ascCredentials.issuerId, forKey: "asc_issuer_id")
+        UserDefaults.standard.set(ascCredentials.teamId, forKey: "asc_team_id")
+        UserDefaults.standard.set(ascCredentials.teamName, forKey: "asc_team_name")
+        if !ascCredentials.privateKeyPem.isEmpty {
+            try? credentialService.savePasswordToKeychain(ascCredentials.privateKeyPem, account: "asc_private_key_p8")
+        }
+    }
+
+    public func loadAscCredentials() {
+        let keyId = UserDefaults.standard.string(forKey: "asc_key_id") ?? ""
+        let issuerId = UserDefaults.standard.string(forKey: "asc_issuer_id") ?? ""
+        let teamId = UserDefaults.standard.string(forKey: "asc_team_id")
+        let teamName = UserDefaults.standard.string(forKey: "asc_team_name")
+        let privateKey = credentialService.loadPasswordFromKeychain(account: "asc_private_key_p8") ?? ""
+
+        self.ascCredentials = AppStoreConnectCredentials(
+            keyId: keyId,
+            issuerId: issuerId,
+            privateKeyPem: privateKey,
+            teamId: teamId,
+            teamName: teamName
+        )
+
+        if let tId = teamId, !tId.isEmpty {
+            self.availableTeams = [
+                DeveloperTeam(id: tId, name: teamName ?? "Apple Developer Team")
+            ]
+            self.selectedTeam = self.availableTeams.first
+        }
+    }
+
+    public func fetchAppleDeveloperTeams() {
+        guard ascCredentials.isValid else {
+            showError("Please provide Key ID, Issuer ID and Private Key (.p8).")
+            return
+        }
+
+        autoProvisioningStep = .fetchingTeams
+        appendLog(LogMessage(level: .info, message: "Validating Apple Developer credentials and querying teams..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let teams = try await self.appleDeveloperService.fetchTeams(credentials: self.ascCredentials)
+                self.availableTeams = teams
+                self.selectedTeam = teams.first
+                self.autoProvisioningStep = .idle
+                self.saveAscCredentials()
+                self.appendLog(LogMessage(level: .success, message: "Connected to Apple Developer Team: \(teams.first?.displayTitle ?? "Unknown")"))
+            } catch {
+                self.autoProvisioningStep = .failed(error: error.localizedDescription)
+                self.showError("Apple Account connection failed: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "Apple Account error: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    public func startAutoProvisioning() {
+        guard ascCredentials.isValid else {
+            showError("App Store Connect API credentials (Key ID, Issuer ID, Private Key) are required.")
+            return
+        }
+
+        appendLog(LogMessage(level: .info, message: "⚡ Starting 1-Click Apple Auto-Provisioning..."))
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let (cert, prof) = try await self.appleDeveloperService.autoProvision(
+                    credentials: self.ascCredentials,
+                    targetDevice: self.selectedDevice,
+                    onStep: { [weak self] step in
+                        Task { @MainActor in
+                            self?.autoProvisioningStep = step
+                        }
+                    },
+                    onLog: { [weak self] log in
+                        Task { @MainActor in
+                            self?.appendLog(log)
+                        }
+                    }
+                )
+
+                self.certificate = cert
+                self.profile = prof
+                if let pwd = self.credentialService.loadPasswordFromKeychain() {
+                    self.p12Password = pwd
+                }
+                self.saveAscCredentials()
+                self.showSettingsSheet = false
+                self.appendLog(LogMessage(level: .success, message: "✨ Auto-Provisioning Successful! App is ready to sign."))
+            } catch {
+                self.autoProvisioningStep = .failed(error: error.localizedDescription)
+                self.showError("Auto-provisioning failed: \(error.localizedDescription)")
+                self.appendLog(LogMessage(level: .error, message: "Auto-provisioning failed: \(error.localizedDescription)"))
+            }
+        }
     }
 
     // MARK: - IPA Selection

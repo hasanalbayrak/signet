@@ -1,36 +1,37 @@
-# Signet 🖋️
+# Signet
 > **Native macOS Sideloading & IPA Resigning Tool**
 
 A lightweight, modern, native macOS alternative to Sideloadly and AltStore built specifically for Apple Developer Program members and sideloading enthusiasts.
 
 Signet eliminates the friction of traditional sideloading:
-- **1-Click Apple Developer Auto-Provisioning:** Log in via official App Store Connect API Key, select your developer team, and Signet automatically registers your device, creates/downloads your 365-day certificate, and generates a Wildcard Provisioning Profile.
+- **1-Click Apple Developer Auto-Provisioning:** Log in via direct Apple ID with 2FA or App Store Connect API Key, select your developer team, and Signet automatically registers your device, creates/downloads your 365-day certificate, and generates a Wildcard Provisioning Profile.
 - **Manual Mode Available:** Alternatively, drag-and-drop standard `.p12` certificates and `.mobileprovision` files.
 - **No Anisette / No 2FA Hassle:** No third-party cloud servers, no account password theft risk, and no 7-day expiration limits.
 
 ---
 
-## ✨ Features
+## Features
 
 - **Apple Developer Account Auto-Provisioning**:
-  - Connect via official App Store Connect API Key (`.p8`).
+  - Direct Apple ID login with 2FA verification support.
+  - Optional App Store Connect API Key (`.p8`) support.
   - Automatic Apple Developer team selection and verification.
   - Automatic iOS device UDID registration in Apple Developer Portal.
   - Generates 365-day Development Certificates and Wildcard Provisioning Profiles (`*`).
 - **Native macOS Liquid Glass Design**: Built with pure SwiftUI for macOS 14+ (Sonoma, Sequoia).
-- **Embedded `zsign` Signing Engine**: Fast C++ signing with Mach-O parsing, dynamic entitlements, and `.zsign_cache` support.
+- **Embedded zsign Signing Engine**: Fast C++ signing with Mach-O parsing, dynamic entitlements, and `.zsign_cache` support.
 - **Tweak & Dylib Injection**: Drag-and-drop external `.dylib` and `.framework` files into the IPA.
 - **Bundle ID & Name Customization**: Easily change the bundle identifier or app display name on the fly.
 - **Dual Device Discovery & Deployment**:
   - **Apple CoreDevice (`devicectl`)**: First-class native support for iOS 17+ and iOS 18+ devices.
-  - **`libimobiledevice` (`idevice_id`, `ideviceinfo`, `ideviceinstaller`)**: Legacy and standard iOS support.
+  - **libimobiledevice (`idevice_id`, `ideviceinfo`, `ideviceinstaller`)**: Legacy and standard iOS support.
 - **Real-time Process Terminal**: Live stdout/stderr log streaming with color-coded severity levels and autoscroll.
 - **Secure Keychain Storage**: Protects `.p12` passphrases and API keys inside macOS Keychain Services (`kSecClassGenericPassword`).
 - **Automated GitHub Releases**: Built-in GitHub Actions CI/CD pipeline packages `.app` bundles and publishes releases on tag push.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 Signet/
@@ -38,12 +39,15 @@ Signet/
 │   └── workflows/
 │       └── release.yml            # Automated GitHub Actions Release Workflow
 ├── Package.swift
+├── scripts/
+│   └── export_app.sh              # Local .app exporter
 ├── Sources/
 │   └── Signet/
 │       ├── App/
 │       │   └── SignetApp.swift
 │       ├── Models/
-│       │   ├── AppleAccountModels.swift   # Teams, ASC credentials & auto-provision state
+│       │   ├── AppleAccountModels.swift
+│       │   ├── AppleIDAuthModels.swift
 │       │   ├── Device.swift
 │       │   ├── CertificateInfo.swift
 │       │   ├── ProvisioningProfileInfo.swift
@@ -52,7 +56,8 @@ Signet/
 │       │   ├── LogMessage.swift
 │       │   └── IPAMetadata.swift
 │       ├── Services/
-│       │   ├── AppleDeveloperService.swift # JWT generation, Device Reg, Cert & Profile Auto-Gen
+│       │   ├── AppleAuthService.swift
+│       │   ├── AppleDeveloperService.swift
 │       │   ├── BinaryManager.swift
 │       │   ├── ProcessRunner.swift
 │       │   ├── CredentialService.swift
@@ -83,7 +88,7 @@ Signet/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -107,28 +112,29 @@ Signet/
    swift test
    ```
 
-3. Launch the application:
+3. Export and open the native application bundle:
    ```bash
-   swift run
+   ./scripts/export_app.sh
+   open Signet.app
    ```
    Or open the folder directly in Xcode (`open Package.swift`) and click **Run**.
 
 ---
 
-## 🔐 Credentials Setup
+## Credentials Setup
 
-### Option 1: Direct Apple ID Login with 2FA (Easiest)
-1. Open **Preferences** (Click ⚙️ in the top bar).
+### Option 1: Direct Apple ID Login with 2FA (Recommended)
+1. Open **Preferences** (Click Settings in the top bar).
 2. Go to **Apple ID (Direct + 2FA)** tab.
 3. Enter your **Apple ID Email** and **Password** -> Click **Sign In with Apple ID**.
 4. When prompted, enter the **6-digit 2FA verification code** sent to your iPhone/iPad/Mac.
 5. Select your **Developer Team** from the dropdown.
-6. Click **⚡ 1-Click Auto Provision (365 Days)**: Signet registers your connected iPhone, requests the development certificate from Apple, generates a Wildcard profile, packages the `.p12`, and stores credentials in macOS Keychain!
+6. Click **1-Click Auto Provision (365 Days)**: Signet registers your connected iPhone, requests the development certificate from Apple, generates a Wildcard profile, packages the `.p12`, and stores credentials in macOS Keychain.
 
 ### Option 2: App Store Connect API Key (.p8)
 1. Open **Preferences** > **API Key (.p8)** tab.
 2. Enter your **Key ID**, **Issuer ID**, and drop your **AuthKey_XXXXX.p8** file.
-   > *To generate an API key, visit [developer.apple.com](https://developer.apple.com) > App Store Connect > Users and Access > Integrations > Generate API Key.*
+   > *To generate an API key, visit developer.apple.com > App Store Connect > Users and Access > Integrations > Generate API Key.*
 3. Click **Connect & Verify API Key** and select your Team.
 4. Click **1-Click Auto Provision via API Key**.
 
@@ -140,7 +146,7 @@ Signet/
 
 ---
 
-## 📦 Automated GitHub Release Workflow
+## Automated GitHub Release Workflow
 
 Signet includes a full GitHub Actions workflow located at `.github/workflows/release.yml`.
 
@@ -160,6 +166,6 @@ The GitHub Actions runner will:
 
 ---
 
-## 📄 License
+## License
 
 MIT License. See [LICENSE](LICENSE) for details.

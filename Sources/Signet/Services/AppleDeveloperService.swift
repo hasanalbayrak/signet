@@ -466,7 +466,7 @@ public final class AppleDeveloperService: @unchecked Sendable {
         )
 
         var teamName = credentials.teamName ?? "Apple Developer Team"
-        var teamId = credentials.teamId ?? credentials.issuerId
+        let teamId = credentials.teamId ?? credentials.issuerId
 
         if let firstCert = listResp.data.first {
             if let name = firstCert.attributes.displayName {

@@ -1,0 +1,54 @@
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r\r
+._*
+.Spotlight-V100
+.Trashes
+
+# Swift / Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode & Apple Build Products
+DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.xcscmblueprint
+
+# Certificates, Keys & Credentials (NEVER COMMIT)
+*.p12
+*.pfx
+*.cer
+*.key
+*.pem
+*.mobileprovision
+*.provisionprofile
+*.certificate
+
+# IPAs, Binaries, Dylibs & Signing Output
+*.ipa
+*.signed.ipa
+*.dylib
+*.deb
+*.app
+.zsign_cache/
+.zsign_debug/
+tmp/
+temp/
+Output/
+
+# Crash Logs
+*.crash

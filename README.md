@@ -3,22 +3,30 @@
 
 A lightweight, modern, native macOS alternative to Sideloadly and AltStore built specifically for Apple Developer Program members and sideloading enthusiasts.
 
-Signet bypasses the need for third-party anisette servers, Apple ID password prompts, and 2FA SMS hassles by working entirely with standard local Apple Developer Certificates (`.p12`) and Provisioning Profiles (`.mobileprovision`).
+Signet eliminates the friction of traditional sideloading:
+- **1-Click Apple Developer Auto-Provisioning:** Log in via official App Store Connect API Key, select your developer team, and Signet automatically registers your device, creates/downloads your 365-day certificate, and generates a Wildcard Provisioning Profile.
+- **Manual Mode Available:** Alternatively, drag-and-drop standard `.p12` certificates and `.mobileprovision` files.
+- **No Anisette / No 2FA Hassle:** No third-party cloud servers, no account password theft risk, and no 7-day expiration limits.
 
 ---
 
 ## ✨ Features
 
+- **Apple Developer Account Auto-Provisioning**:
+  - Connect via official App Store Connect API Key (`.p8`).
+  - Automatic Apple Developer team selection and verification.
+  - Automatic iOS device UDID registration in Apple Developer Portal.
+  - Generates 365-day Development Certificates and Wildcard Provisioning Profiles (`*`).
 - **Native macOS Liquid Glass Design**: Built with pure SwiftUI for macOS 14+ (Sonoma, Sequoia).
-- **365-Day Uninterrupted Sideloading**: Designed for paid Apple Developer accounts with full validity inspection.
 - **Embedded `zsign` Signing Engine**: Fast C++ signing with Mach-O parsing, dynamic entitlements, and `.zsign_cache` support.
 - **Tweak & Dylib Injection**: Drag-and-drop external `.dylib` and `.framework` files into the IPA.
 - **Bundle ID & Name Customization**: Easily change the bundle identifier or app display name on the fly.
 - **Dual Device Discovery & Deployment**:
-  - **Apple CoreDevice (`devicectl`)**: First-class support for modern iOS 17+ / 18+ devices.
+  - **Apple CoreDevice (`devicectl`)**: First-class native support for iOS 17+ and iOS 18+ devices.
   - **`libimobiledevice` (`idevice_id`, `ideviceinfo`, `ideviceinstaller`)**: Legacy and standard iOS support.
 - **Real-time Process Terminal**: Live stdout/stderr log streaming with color-coded severity levels and autoscroll.
-- **Secure Keychain Storage**: Protects `.p12` passphrases inside macOS Keychain Services (`kSecClassGenericPassword`).
+- **Secure Keychain Storage**: Protects `.p12` passphrases and API keys inside macOS Keychain Services (`kSecClassGenericPassword`).
+- **Automated GitHub Releases**: Built-in GitHub Actions CI/CD pipeline packages `.app` bundles and publishes releases on tag push.
 
 ---
 
@@ -26,12 +34,16 @@ Signet bypasses the need for third-party anisette servers, Apple ID password pro
 
 ```
 Signet/
+├── .github/
+│   └── workflows/
+│       └── release.yml            # Automated GitHub Actions Release Workflow
 ├── Package.swift
 ├── Sources/
 │   └── Signet/
 │       ├── App/
 │       │   └── SignetApp.swift
 │       ├── Models/
+│       │   ├── AppleAccountModels.swift   # Teams, ASC credentials & auto-provision state
 │       │   ├── Device.swift
 │       │   ├── CertificateInfo.swift
 │       │   ├── ProvisioningProfileInfo.swift
@@ -40,6 +52,7 @@ Signet/
 │       │   ├── LogMessage.swift
 │       │   └── IPAMetadata.swift
 │       ├── Services/
+│       │   ├── AppleDeveloperService.swift # JWT generation, Device Reg, Cert & Profile Auto-Gen
 │       │   ├── BinaryManager.swift
 │       │   ├── ProcessRunner.swift
 │       │   ├── CredentialService.swift
@@ -89,9 +102,8 @@ Signet/
    cd signet
    ```
 
-2. Build and run tests:
+2. Run the test suite:
    ```bash
-   swift build
    swift test
    ```
 
@@ -105,21 +117,39 @@ Signet/
 
 ## 🔐 Credentials Setup
 
-1. Open **Signet Preferences** (Click the ⚙️ icon or **Configure** on the certificate card).
-2. Select your Apple Development Certificate (`.p12`) and enter your export password.
-   - The password is saved securely to your local macOS Keychain.
-3. Select your Provisioning Profile (`.mobileprovision`).
-   - Wildcard profiles (`*`) are highlighted with a badge and automatically strip incompatible extensions if selected.
-4. Signet validates the certificates and displays remaining days (e.g. `365 days remaining`).
+### Option 1: 1-Click Auto Provisioning (Recommended)
+1. Open **Preferences** (Click ⚙️ in the top bar).
+2. Go to **Apple Developer Login** tab.
+3. Enter your **Key ID**, **Issuer ID**, and drop your **AuthKey_XXXXX.p8** file.
+   > *To generate an API key, go to [developer.apple.com](https://developer.apple.com) > App Store Connect > Users and Access > Integrations > Generate API Key (Role: Developer or Admin).*
+4. Click **Connect & Verify Account** and select your Developer Team.
+5. Click **1-Click Auto Provision (365 Days)**: Signet registers your connected iPhone, requests the certificate, creates a Wildcard profile, packages the `.p12`, and stores the password in Keychain!
+
+### Option 2: Manual .p12 & Provisioning Profile
+1. Open **Preferences** > **Manual (.p12 / Profile)** tab.
+2. Select your `.p12` file and enter your password.
+3. Select your `.mobileprovision` file.
+4. Signet verifies validity and displays the remaining days count.
 
 ---
 
-## 📱 Developer Mode on iOS 16+
+## 📦 Automated GitHub Release Workflow
 
-If installing an app fails with a Developer Mode error:
-1. Open **Settings** on your iOS device.
-2. Navigate to **Privacy & Security** > **Developer Mode**.
-3. Toggle **Developer Mode** ON and restart the device when prompted.
+Signet includes a full GitHub Actions workflow located at `.github/workflows/release.yml`.
+
+To create a new release on GitHub:
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The GitHub Actions runner will:
+1. Spin up a `macos-14` Apple Silicon runner.
+2. Build standalone `zsign` with static OpenSSL.
+3. Run the complete unit test suite (`swift test`).
+4. Compile the release binary and bundle a signed `Signet.app`.
+5. Package `Signet-macOS-AppleSilicon.zip`.
+6. Automatically publish a new GitHub Release with release notes and downloadable assets.
 
 ---
 

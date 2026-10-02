@@ -1,0 +1,117 @@
+name: Build & Release Signet
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for the release (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release macOS App
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode Version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+          swift --version
+
+      - name: Install Build Dependencies
+        run: |
+          brew install openssl@3 pkg-config
+
+      - name: Build Standalone zsign Signing Engine
+        run: |
+          chmod +x Sources/Signet/Resources/Scripts/build_zsign.sh
+          ./Sources/Signet/Resources/Scripts/build_zsign.sh
+
+      - name: Run Test Suite
+        run: |
+          swift test
+
+      - name: Build Signet Release Executable
+        run: |
+          swift build -c release
+
+      - name: Package macOS Application (.app bundle)
+        run: |
+          APP_NAME="Signet.app"
+          CONTENTS_DIR="$APP_NAME/Contents"
+          MACOS_DIR="$CONTENTS_DIR/MacOS"
+          RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+          rm -rf "$APP_NAME"
+          mkdir -p "$MACOS_DIR"
+          mkdir -p "$RESOURCES_DIR/bin"
+
+          # Copy main executable
+          cp .build/release/Signet "$MACOS_DIR/Signet"
+          chmod +x "$MACOS_DIR/Signet"
+
+          # Copy bundled zsign engine
+          cp Sources/Signet/Resources/bin/zsign "$RESOURCES_DIR/bin/zsign"
+          chmod +x "$RESOURCES_DIR/bin/zsign"
+
+          # Create Info.plist
+          cat << 'EOF' > "$CONTENTS_DIR/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>Signet</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.signet.macos</string>
+              <key>CFBundleName</key>
+              <string>Signet</string>
+              <key>CFBundleDisplayName</key>
+              <string>Signet</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>NSSupportsAutomaticGraphicsSwitching</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # Ad-hoc sign the application bundle
+          codesign --force --deep --sign - "$APP_NAME"
+
+          # Create ZIP distribution package
+          RELEASE_ZIP="Signet-macOS-AppleSilicon.zip"
+          zip -r -y -q "$RELEASE_ZIP" "$APP_NAME"
+          echo "RELEASE_ZIP=$RELEASE_ZIP" >> $GITHUB_ENV
+
+      - name: Generate Release Notes & Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          name: Signet ${{ github.event.inputs.tag_name || github.ref_name }}
+          files: ${{ env.RELEASE_ZIP }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

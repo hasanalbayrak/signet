@@ -682,15 +682,43 @@ public final class AppleAuthService: @unchecked Sendable {
             let pwd = "SignetLocalPass\(Int.random(in: 100000...999999))"
             do {
                 let p12Data = try exportKeychainIdentity(identityName: local.name, password: pwd)
-                // Find matching certificateId on portal if possible
+                let isLocalDist = local.name.localizedCaseInsensitiveContains("Distribution")
+                isDistributionCert = isLocalDist
+
+                // Clean name extractor to match developer or team across differing prefixes
+                func cleanCertName(_ raw: String) -> String {
+                    var s = raw
+                    if let colonIdx = s.firstIndex(of: ":") {
+                        s = String(s[s.index(after: colonIdx)...])
+                    }
+                    if let parenIdx = s.firstIndex(of: "(") {
+                        s = String(s[..<parenIdx])
+                    }
+                    return s.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+
+                let cleanLocal = cleanCertName(local.name)
+
+                // Find matching certificateId on portal strictly within the same category (Development vs Distribution)
                 let portalCerts = (try? await fetchPortalCertificates(session: session, team: team, onLog: onLog)) ?? []
-                let matchingCert = portalCerts.first(where: {
-                    $0.isIssued && (local.name.contains($0.name) || $0.name.contains(local.name) || ($0.ownerName != nil && local.name.contains($0.ownerName!)))
-                }) ?? portalCerts.first(where: { $0.isIssued })
+                let typeFilteredCerts = portalCerts.filter { $0.isIssued && ($0.isDistribution == isLocalDist) }
+
+                let matchingCert = typeFilteredCerts.first(where: {
+                    let cleanPortal = cleanCertName($0.name)
+                    return cleanPortal.caseInsensitiveCompare(cleanLocal) == .orderedSame ||
+                           $0.name.localizedCaseInsensitiveContains(cleanLocal) ||
+                           cleanLocal.localizedCaseInsensitiveContains(cleanPortal) ||
+                           ($0.ownerName != nil && $0.ownerName!.localizedCaseInsensitiveContains(cleanLocal))
+                }) ?? typeFilteredCerts.first
+
                 let cId = matchingCert?.id ?? ""
-                isDistributionCert = matchingCert?.isDistribution ?? (local.name.localizedCaseInsensitiveContains("Distribution"))
-                certResult = CertPackage(certId: cId, p12Data: p12Data, password: pwd)
-                onLog?(LogMessage(level: .success, message: "Successfully prepared local developer identity for code signing."))
+                if !cId.isEmpty {
+                    onLog?(LogMessage(level: .info, message: "Matched Keychain identity with portal certificate ID '\(cId)' (\(matchingCert?.name ?? "Portal Cert"))."))
+                    certResult = CertPackage(certId: cId, p12Data: p12Data, password: pwd)
+                    onLog?(LogMessage(level: .success, message: "Successfully prepared local developer identity for code signing."))
+                } else {
+                    onLog?(LogMessage(level: .warning, message: "No matching portal certificate ID found for '\(cleanLocal)' in \(isLocalDist ? "Distribution" : "Development") certificates. Requesting a fresh certificate from Apple..."))
+                }
             } catch {
                 onLog?(LogMessage(level: .warning, message: "Could not export local identity from Keychain: \(error.localizedDescription). Falling back to fresh certificate request..."))
             }
@@ -1009,11 +1037,11 @@ public final class AppleAuthService: @unchecked Sendable {
     ) async throws -> Data {
         onLog?(LogMessage(level: .info, message: "Checking for existing Wildcard profiles via Xcode API..."))
 
-        // 1. Try Xcode API for instant profile retrieval (contains base64 encodedProfile)
+        // 1. Try Xcode API for instant profile retrieval (contains base64 encodedProfile or download ID)
         let xcodeURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action")!
         let xcodeParams: [String: Any] = [
             "teamId": team.id,
-            "includeInactiveProfiles": true,
+            "includeInactiveProfiles": false,
             "includeExpiredProfiles": false
         ]
         let xcodeReq = makeXcodePlistRequest(url: xcodeURL, params: xcodeParams, cookies: cookies)
@@ -1026,8 +1054,8 @@ public final class AppleAuthService: @unchecked Sendable {
             let wildcardProf = profiles.first(where: {
                 let name = ($0["name"] as? String) ?? ""
                 let appId = (($0["appId"] as? [String: Any])?["identifier"] as? String) ?? ""
-                return name.contains("*") || appId.contains("*")
-            }) ?? profiles.first
+                return name.contains("*") || appId.contains("*") || name.localizedCaseInsensitiveContains("wildcard")
+            })
 
             if let prof = wildcardProf {
                 if let encodedData = prof["encodedProfile"] as? Data {
@@ -1036,6 +1064,14 @@ public final class AppleAuthService: @unchecked Sendable {
                 } else if let b64Str = prof["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64Str) {
                     onLog?(LogMessage(level: .success, message: "Retrieved Provisioning Profile via Xcode API!"))
                     return decoded
+                } else if let pId = (prof["provisioningProfileId"] as? String) ?? (prof["id"] as? String), !pId.isEmpty {
+                    let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
+                    let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
+                    if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (Xcode Wildcard)", onLog: onLog),
+                       dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
+                        onLog?(LogMessage(level: .success, message: "Downloaded existing wildcard profile: \(prof["name"] as? String ?? pId)"))
+                        return dlRes.data
+                    }
                 }
             }
         }
@@ -1059,12 +1095,12 @@ public final class AppleAuthService: @unchecked Sendable {
                 return status.caseInsensitiveCompare("Active") == .orderedSame || status.caseInsensitiveCompare("Issued") == .orderedSame || status.isEmpty
             }
 
-            let candidate = activeProfiles.first(where: {
+            let wildcardCandidate = activeProfiles.first(where: {
                 let name = ($0["name"] as? String) ?? ""
                 return name.contains("*") || name.localizedCaseInsensitiveContains("wildcard")
-            }) ?? activeProfiles.first
+            })
 
-            if let chosen = candidate, let pId = (chosen["provisioningProfileId"] as? String) ?? (chosen["id"] as? String), !pId.isEmpty {
+            if let chosen = wildcardCandidate, let pId = (chosen["provisioningProfileId"] as? String) ?? (chosen["id"] as? String), !pId.isEmpty {
                 if let b64 = chosen["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
                     onLog?(LogMessage(level: .success, message: "Retrieved existing active profile: \(chosen["name"] as? String ?? pId)"))
                     return decoded
@@ -1072,7 +1108,7 @@ public final class AppleAuthService: @unchecked Sendable {
 
                 let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(pId)")!
                 let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
-                if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (existing)", onLog: onLog),
+                if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (Portal Wildcard)", onLog: onLog),
                    dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
                     onLog?(LogMessage(level: .success, message: "Downloaded existing active profile: \(chosen["name"] as? String ?? pId)"))
                     return dlRes.data
@@ -1136,15 +1172,21 @@ public final class AppleAuthService: @unchecked Sendable {
             }
         }
 
-        // 5. Create Provisioning Profile via Developer Portal
+        // 5. Create Provisioning Profile
         let targetCertId = certId
         let profName = "Signet Wildcard \(Int.random(in: 100...999))"
+        let distType = isDistribution ? (allDeviceIds.isEmpty ? "store" : "adhoc") : "limited"
+
+        onLog?(LogMessage(level: .info, message: "Creating Wildcard profile '\(profName)' (distributionType: \(distType), certId: \(targetCertId.isEmpty ? "None" : targetCertId))..."))
+
+        var profileId = ""
+
+        // 5a. Primary: Developer Portal Web Endpoint
         let createProfURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/createProvisioningProfile.action")!
         var createParams: [String: String] = [
             "teamId": team.id,
             "provisioningProfileName": profName,
-            "distributionType": isDistribution ? (allDeviceIds.isEmpty ? "store" : "adhoc") : "limited",
-            "subPlatform": "multios"
+            "distributionType": distType
         ]
         if !targetCertId.isEmpty && targetCertId != "LOCAL_CERT" {
             createParams["certificateIds"] = targetCertId
@@ -1152,14 +1194,13 @@ public final class AppleAuthService: @unchecked Sendable {
         if !appIdId.isEmpty {
             createParams["appIdId"] = appIdId
         }
-        if !allDeviceIds.isEmpty {
+        if (distType == "limited" || distType == "adhoc") && !allDeviceIds.isEmpty {
             createParams["deviceIds"] = allDeviceIds.joined(separator: ",")
         }
 
         let createProfReq = makePortalRequest(url: createProfURL, method: "POST", bodyParams: createParams, cookies: cookies)
-
-        var profileId = ""
-        if let cRes = try? await executePortalRequest(createProfReq, session: urlSession, operationName: "createProvisioningProfile", onLog: onLog),
+        if let cRes = try? await executePortalRequest(createProfReq, session: urlSession, operationName: "createProvisioningProfile (Portal)", onLog: onLog),
+           cRes.response.statusCode == 200,
            let json = cRes.json,
            let profObj = json["provisioningProfile"] as? [String: Any] {
             profileId = (profObj["provisioningProfileId"] as? String) ?? (profObj["id"] as? String) ?? ""
@@ -1169,14 +1210,65 @@ public final class AppleAuthService: @unchecked Sendable {
             }
         }
 
+        // 5b. Fallback: Xcode Plist API
+        if profileId.isEmpty {
+            onLog?(LogMessage(level: .info, message: "Attempting profile creation via Xcode Plist API fallback..."))
+            let xcCreateURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/createProvisioningProfile.action")!
+            var xcParams: [String: Any] = [
+                "teamId": team.id,
+                "provisioningProfileName": profName,
+                "distributionType": distType
+            ]
+            if !targetCertId.isEmpty && targetCertId != "LOCAL_CERT" {
+                xcParams["certificateIds"] = [targetCertId]
+            }
+            if !appIdId.isEmpty {
+                xcParams["appIdId"] = appIdId
+            }
+            if (distType == "limited" || distType == "adhoc") && !allDeviceIds.isEmpty {
+                xcParams["deviceIds"] = allDeviceIds
+            }
+            let xcCreateReq = makeXcodePlistRequest(url: xcCreateURL, params: xcParams, cookies: cookies)
+            if let xcRes = try? await executePortalRequest(xcCreateReq, session: urlSession, operationName: "createProvisioningProfile (Xcode)", onLog: onLog),
+               xcRes.response.statusCode == 200 {
+                let plist = (try? PropertyListSerialization.propertyList(from: xcRes.data, options: [], format: nil) as? [String: Any]) ?? xcRes.json
+                if let profObj = plist?["provisioningProfile"] as? [String: Any] {
+                    if let enc = profObj["encodedProfile"] as? Data {
+                        onLog?(LogMessage(level: .success, message: "Profile created via Xcode API: \(profName)"))
+                        return enc
+                    } else if let b64 = profObj["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
+                        onLog?(LogMessage(level: .success, message: "Profile created via Xcode API: \(profName)"))
+                        return decoded
+                    } else if let pId = (profObj["provisioningProfileId"] as? String) ?? (profObj["id"] as? String), !pId.isEmpty {
+                        profileId = pId
+                    }
+                }
+            }
+        }
+
         // 6. Download profile content if created
         if !profileId.isEmpty {
             let dlURL = URL(string: "https://developer.apple.com/services-account/QH65B2/account/ios/profile/downloadProfileContent?teamId=\(team.id)&provisioningProfileId=\(profileId)")!
             let dlReq = makePortalRequest(url: dlURL, method: "GET", cookies: cookies)
-            if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent", onLog: onLog),
+            if let dlRes = try? await executePortalRequest(dlReq, session: urlSession, operationName: "downloadProfileContent (Portal)", onLog: onLog),
                dlRes.response.statusCode == 200, !dlRes.data.isEmpty {
                 onLog?(LogMessage(level: .success, message: "Downloaded profile: \(profName)"))
                 return dlRes.data
+            }
+
+            // Fallback: download via Xcode API
+            let xcDlURL = URL(string: "https://developerservices2.apple.com/services/QH65B2/ios/downloadProvisioningProfile.action")!
+            let xcDlReq = makeXcodePlistRequest(url: xcDlURL, params: ["teamId": team.id, "provisioningProfileId": profileId], cookies: cookies)
+            if let xcDlRes = try? await executePortalRequest(xcDlReq, session: urlSession, operationName: "downloadProvisioningProfile (Xcode)", onLog: onLog),
+               xcDlRes.response.statusCode == 200 {
+                let xcPlist = (try? PropertyListSerialization.propertyList(from: xcDlRes.data, options: [], format: nil) as? [String: Any]) ?? xcDlRes.json
+                if let dlProf = xcPlist?["provisioningProfile"] as? [String: Any] {
+                    if let enc = dlProf["encodedProfile"] as? Data {
+                        return enc
+                    } else if let b64 = dlProf["encodedProfile"] as? String, let decoded = Data(base64Encoded: b64) {
+                        return decoded
+                    }
+                }
             }
         }
 

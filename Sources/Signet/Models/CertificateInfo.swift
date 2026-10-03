@@ -50,4 +50,33 @@ public struct CertificateInfo: Identifiable, Hashable, Codable {
     public var isExpiringSoon: Bool {
         return !isExpired && daysRemaining <= 30
     }
+
+    public var cleanDisplayName: String {
+        var s = commonName
+        if let colonIdx = s.firstIndex(of: ":") {
+            s = String(s[s.index(after: colonIdx)...])
+        }
+        if let parenIdx = s.firstIndex(of: "(") {
+            s = String(s[..<parenIdx])
+        }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return teamName.isEmpty ? commonName : teamName
+    }
+
+    public var isDistribution: Bool {
+        commonName.localizedCaseInsensitiveContains("Distribution") ||
+        teamName.localizedCaseInsensitiveContains("Distribution")
+    }
+
+    public var typeDisplayName: String {
+        if isDistribution {
+            return "Distribution"
+        } else if commonName.localizedCaseInsensitiveContains("Development") {
+            return "Development"
+        }
+        return "Certificate"
+    }
 }

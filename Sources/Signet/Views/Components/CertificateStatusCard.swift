@@ -8,70 +8,122 @@ public struct CertificateStatusCard: View {
     }
 
     public var body: some View {
-        HStack(spacing: 16) {
-            // Certificate Icon
+        HStack(spacing: 14) {
+            // Certificate Dynamic Icon
             ZStack {
+                let isDist = appState.certificate?.isDistribution == true
+                let hasCert = appState.certificate != nil
                 Circle()
-                    .fill(appState.certificate != nil ? Color.green.opacity(0.15) : Color.orange.opacity(0.15))
+                    .fill(
+                        hasCert ?
+                            (isDist ? Color.purple.opacity(0.15) : Color.blue.opacity(0.15)) :
+                            Color.orange.opacity(0.15)
+                    )
                     .frame(width: 44, height: 44)
 
-                Image(systemName: appState.certificate != nil ? "checkmark.seal.fill" : "lock.badge.clock.fill")
+                Image(systemName: hasCert ? (isDist ? "shippingbox.fill" : "checkmark.seal.fill") : "lock.badge.clock.fill")
                     .font(.system(size: 20))
-                    .foregroundStyle(appState.certificate != nil ? Color.green : Color.orange)
+                    .foregroundStyle(
+                        hasCert ?
+                            (isDist ? Color.purple : Color.blue) :
+                            Color.orange
+                    )
             }
 
             // Information block
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 if let cert = appState.certificate {
+                    // Line 1: Cert Name + Badges
                     HStack(spacing: 8) {
-                        Text(cert.teamName)
-                            .font(.system(size: 14, weight: .bold))
+                        Text(cert.cleanDisplayName)
+                            .font(.system(size: 13, weight: .bold))
+                            .lineLimit(1)
 
-                        Text("(\(cert.teamId))")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-
-                        // Validity pill
-                        Text(cert.validityStatusText)
-                            .font(.system(size: 10, weight: .semibold))
+                        // Distribution vs Development badge
+                        Text(cert.typeDisplayName)
+                            .font(.system(size: 9, weight: .bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(cert.isExpired ? Color.red.opacity(0.15) : (cert.isExpiringSoon ? Color.orange.opacity(0.2) : Color.green.opacity(0.15)))
-                            .foregroundStyle(cert.isExpired ? Color.red : (cert.isExpiringSoon ? Color.orange : Color.green))
+                            .background(cert.isDistribution ? Color.purple.opacity(0.15) : Color.blue.opacity(0.15))
+                            .foregroundStyle(cert.isDistribution ? Color.purple : Color.blue)
                             .clipShape(Capsule())
+
+                        // Validity pill
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(cert.isExpired ? Color.red : (cert.isExpiringSoon ? Color.orange : Color.green))
+                                .frame(width: 5, height: 5)
+                            Text(cert.validityStatusText)
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(cert.isExpired ? Color.red.opacity(0.15) : (cert.isExpiringSoon ? Color.orange.opacity(0.2) : Color.green.opacity(0.15)))
+                        .foregroundStyle(cert.isExpired ? Color.red : (cert.isExpiringSoon ? Color.orange : Color.green))
+                        .clipShape(Capsule())
                     }
 
+                    // Line 2: Team Name & Team ID
+                    let teamDisplay = appState.selectedTeam?.name ?? cert.teamName
+                    let teamIdDisplay = (appState.selectedTeam?.id ?? cert.teamId)
+                    HStack(spacing: 6) {
+                        Image(systemName: "building.2.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+
+                        Text(teamDisplay)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        if !teamIdDisplay.isEmpty && teamIdDisplay != "UNKNOWN" {
+                            Text("(\(teamIdDisplay))")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+
+                    // Line 3: Provisioning Profile
                     if let profile = appState.profile {
                         HStack(spacing: 6) {
-                            Image(systemName: "doc.badge.gearshape")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                            Image(systemName: "doc.text.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.accentColor)
 
                             Text(profile.name)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.primary)
                                 .lineLimit(1)
 
                             if profile.isWildcard {
                                 Text("Wildcard (*)")
                                     .font(.system(size: 9, weight: .bold))
-                                    .padding(.horizontal, 4)
+                                    .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
-                                    .background(Color.blue.opacity(0.15))
+                                    .background(Color.blue.opacity(0.12))
                                     .foregroundStyle(Color.blue)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
                             }
+
+                            Text("• \(profile.validityStatusText)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("No Provisioning Profile loaded")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.orange)
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.orange)
+                            Text("No Provisioning Profile Active")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.orange)
+                        }
                     }
                 } else {
                     Text("No Developer Certificate Configured")
                         .font(.system(size: 13, weight: .semibold))
 
-                    Text("Import your .p12 certificate and .mobileprovision to enable 365-day signing.")
+                    Text("Import your .p12 certificate and .mobileprovision or use 1-Click Apple ID provisioning.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -100,7 +152,7 @@ public struct CertificateStatusCard: View {
                         Image(systemName: appState.certificate != nil ? "gearshape" : "plus.circle.fill")
                         Text(appState.certificate != nil ? "Manage" : "Configure")
                     }
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

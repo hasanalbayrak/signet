@@ -6,6 +6,7 @@ public enum DeploymentError: LocalizedError {
     case developerModeDisabled
     case deviceLocked
     case trustRequired
+    case developerDiskImageNotMounted(String)
     case installationFailed(String)
 
     public var errorDescription: String? {
@@ -17,9 +18,11 @@ public enum DeploymentError: LocalizedError {
         case .developerModeDisabled:
             return "Developer Mode is DISABLED on this iOS device. On iOS 16+, go to Settings > Privacy & Security > Developer Mode, turn it ON, and restart your device."
         case .deviceLocked:
-            return "Device is locked with a passcode. Please unlock your iOS device and try again."
+            return "iPhone ekranı kilitli! Apple güvenlik politikası gereği cihaz kilitliyken Developer Disk Image mount edilemez ve uygulama yüklenemez. Lütfen iPhone ekran kilidinizi açıp tekrar deneyin."
         case .trustRequired:
             return "Host computer is not trusted. Unlock your device and tap 'Trust' on the trust dialog."
+        case .developerDiskImageNotMounted(let msg):
+            return msg
         case .installationFailed(let msg):
             return "Installation failed: \(msg)"
         }
@@ -73,6 +76,13 @@ public final class InstallerService: @unchecked Sendable {
                     onLog: onLog
                 )
                 return
+            } catch let depError as DeploymentError {
+                switch depError {
+                case .developerModeDisabled, .deviceLocked, .developerDiskImageNotMounted:
+                    throw depError
+                default:
+                    onLog?(LogMessage(level: .warning, message: "devicectl failed: \(depError.localizedDescription). Trying libimobiledevice fallback..."))
+                }
             } catch {
                 onLog?(LogMessage(level: .warning, message: "devicectl failed: \(error.localizedDescription). Trying libimobiledevice fallback..."))
             }
@@ -107,7 +117,36 @@ public final class InstallerService: @unchecked Sendable {
         onProgress: (@Sendable (Double, String) -> Void)?,
         onLog: (@Sendable (LogMessage) -> Void)?
     ) async throws {
-        onProgress?(0.1, "Connecting to device via CoreDevice...")
+        onProgress?(0.05, "Checking device lock status...")
+
+        // 1. Proactive Lock State Check
+        let lockCheck = try? await runner.run(
+            executablePath: xcrunPath,
+            arguments: ["devicectl", "device", "info", "lockState", "--device", device.udid]
+        )
+        if let out = lockCheck?.output.lowercased(), out.contains("passcoderequired: true") {
+            onLog?(LogMessage(level: .warning, message: "Device '\(device.displayName)' is locked. Waiting up to 8 seconds for you to unlock the screen..."))
+            onProgress?(0.05, "Lütfen iPhone ekran kilidini açın...")
+
+            var isUnlocked = false
+            for _ in 1...8 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let retryCheck = try? await runner.run(
+                    executablePath: xcrunPath,
+                    arguments: ["devicectl", "device", "info", "lockState", "--device", device.udid]
+                )
+                if let retryOut = retryCheck?.output.lowercased(), retryOut.contains("passcoderequired: false") {
+                    isUnlocked = true
+                    onLog?(LogMessage(level: .success, message: "Device unlocked! Resuming deployment..."))
+                    break
+                }
+            }
+            if !isUnlocked {
+                throw DeploymentError.deviceLocked
+            }
+        }
+
+        onProgress?(0.15, "Connecting to device via CoreDevice...")
 
         let state = SessionState()
         let result = try await runner.run(
@@ -119,9 +158,11 @@ public final class InstallerService: @unchecked Sendable {
             onLog?(LogMessage(level: level, message: line))
 
             if lower.contains("developer mode is not enabled") || lower.contains("developermodedisabled") {
-                state.capturedError = "Developer Mode is disabled on this device."
-            } else if lower.contains("passcode") || lower.contains("device is locked") {
-                state.capturedError = "Device is locked with passcode."
+                state.capturedError = "developer_mode"
+            } else if lower.contains("passcode") || lower.contains("device was still locked") || lower.contains("device is currently locked") || lower.contains("10003") || lower.contains("unlock the device") {
+                state.capturedError = "device_locked"
+            } else if lower.contains("12040") || lower.contains("developer disk image could not be mounted") {
+                state.capturedError = "ddi_error"
             } else if lower.contains("transferring") || lower.contains("uploading") {
                 onProgress?(0.4, "Transferring app package to device...")
             } else if lower.contains("installing") {
@@ -131,10 +172,17 @@ public final class InstallerService: @unchecked Sendable {
             }
         }
 
-        if state.capturedError.contains("Developer Mode") {
-            throw DeploymentError.developerModeDisabled
-        } else if state.capturedError.contains("passcode") {
+        let fullOut = result.output.lowercased()
+        if state.capturedError == "device_locked" || fullOut.contains("10003") || fullOut.contains("device was still locked") || fullOut.contains("device is currently locked") {
             throw DeploymentError.deviceLocked
+        } else if state.capturedError == "developer_mode" || fullOut.contains("developermodedisabled") {
+            throw DeploymentError.developerModeDisabled
+        } else if state.capturedError == "ddi_error" || fullOut.contains("12040") {
+            throw DeploymentError.developerDiskImageNotMounted(
+                "Developer Disk Image (DDI) mount edilemedi (Hata 12040). " +
+                "iOS Beta sürümleri için lütfen cihazınızın ekran kilidini açıp Xcode'u başlatın ve 'Window > Devices and Simulators' menüsünü açın. " +
+                "Xcode, bu iOS Beta sürümü için gereken DDI'ı Apple'dan otomatik olarak indirecektir."
+            )
         }
 
         if !result.isSuccess {

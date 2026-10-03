@@ -347,4 +347,160 @@ final class SignetTests: XCTestCase {
         XCTAssertTrue(inHouseCert.isDistribution)
         XCTAssertTrue(inHouseCert.isTeamScoped)
     }
+
+    func testIPAEntitlementsCreationAndCategorization() {
+        let dict: [String: Any] = [
+            "application-identifier": "TEAM123456.com.example.MyApp",
+            "get-task-allow": true,
+            "keychain-access-groups": ["TEAM123456.com.example.MyApp", "TEAM123456.shared"],
+            "com.apple.developer.associated-domains": ["applinks:example.com"],
+            "com.apple.security.application-groups": ["group.com.example.myapp"],
+            "aps-environment": "development"
+        ]
+
+        let entitlements = IPAEntitlements.from(dictionary: dict, source: .codeSignature)
+        XCTAssertEqual(entitlements.count, 6)
+        XCTAssertEqual(entitlements.applicationIdentifier, "TEAM123456.com.example.MyApp")
+        XCTAssertEqual(entitlements.teamId, "TEAM123456")
+        XCTAssertEqual(entitlements.getTaskAllow, true)
+        XCTAssertEqual(entitlements.keychainAccessGroups.count, 2)
+        XCTAssertEqual(entitlements.appGroups, ["group.com.example.myapp"])
+        XCTAssertEqual(entitlements.associatedDomains, ["applinks:example.com"])
+        XCTAssertEqual(entitlements.apsEnvironment, "development")
+
+        // Verify XML generation
+        XCTAssertTrue(entitlements.rawXML.contains("<plist"))
+        XCTAssertTrue(entitlements.rawXML.contains("TEAM123456.com.example.MyApp"))
+
+        // Verify Categories
+        let items = entitlements.items
+        let identityItem = items.first { $0.key == "application-identifier" }
+        XCTAssertEqual(identityItem?.category, .identity)
+
+        let appGroupItem = items.first { $0.key == "com.apple.security.application-groups" }
+        XCTAssertEqual(appGroupItem?.category, .appGroups)
+
+        let keychainItem = items.first { $0.key == "keychain-access-groups" }
+        XCTAssertEqual(keychainItem?.category, .keychain)
+
+        let pushItem = items.first { $0.key == "aps-environment" }
+        XCTAssertEqual(pushItem?.category, .push)
+    }
+
+    func testIPAEntitlementsAdaptation() {
+        let dict: [String: Any] = [
+            "application-identifier": "OLDTEAM123.com.source.app",
+            "com.apple.developer.team-identifier": "OLDTEAM123",
+            "keychain-access-groups": ["OLDTEAM123.com.source.app", "OLDTEAM123.sharedKey"],
+            "com.apple.security.application-groups": ["group.com.source.app"],
+            "get-task-allow": true
+        ]
+
+        let sourceEnt = IPAEntitlements.from(dictionary: dict, source: .codeSignature)
+        let adapted = sourceEnt.adapted(newTeamId: "NEWTEAM456", newBundleId: "com.target.custom")
+
+        XCTAssertEqual(adapted.teamId, "NEWTEAM456")
+        XCTAssertEqual(adapted.applicationIdentifier, "NEWTEAM456.com.target.custom")
+        XCTAssertEqual(adapted.dictionary["com.apple.developer.team-identifier"] as? String, "NEWTEAM456")
+
+        let newKeychain = adapted.keychainAccessGroups
+        XCTAssertEqual(newKeychain.count, 2)
+        XCTAssertEqual(newKeychain[0], "NEWTEAM456.com.source.app")
+        XCTAssertEqual(newKeychain[1], "NEWTEAM456.sharedKey")
+
+        // Other capabilities preserved
+        XCTAssertEqual(adapted.appGroups, ["group.com.source.app"])
+        XCTAssertEqual(adapted.getTaskAllow, true)
+    }
+
+    func testExportAndImportEntitlementsFile() throws {
+        let dict: [String: Any] = [
+            "application-identifier": "ABC999XYZ.com.export.test",
+            "get-task-allow": false,
+            "com.apple.developer.associated-domains": ["applinks:test.org"]
+        ]
+
+        let entitlements = IPAEntitlements.from(dictionary: dict, source: .provisioningProfile)
+
+        let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("exported_test_\(UUID().uuidString).entitlements")
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        try IPAManager.shared.exportEntitlements(entitlements, to: tempFile)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempFile.path))
+
+        let imported = try IPAManager.shared.importEntitlements(from: tempFile)
+        XCTAssertEqual(imported.count, 3)
+        XCTAssertEqual(imported.applicationIdentifier, "ABC999XYZ.com.export.test")
+        XCTAssertEqual(imported.getTaskAllow, false)
+        XCTAssertEqual(imported.associatedDomains, ["applinks:test.org"])
+    }
+
+    func testSigningConfigurationEntitlementsFlag() {
+        var config = SigningConfiguration()
+        XCTAssertFalse(config.hasCustomEntitlements)
+
+        let testURL = URL(fileURLWithPath: "/tmp/custom.entitlements")
+        config.customEntitlementsURL = testURL
+        XCTAssertTrue(config.hasCustomEntitlements)
+
+        config.customEntitlementsURL = nil
+        config.customEntitlementsContent = "<plist><dict></dict></plist>"
+        XCTAssertTrue(config.hasCustomEntitlements)
+    }
+
+    func testMockIPAEntitlementsExtraction() async throws {
+        // Create a temporary mock IPA zip file with Payload/MockApp.app/Info.plist and embedded .xcent
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("MockIPABuild_\(UUID().uuidString)")
+        let appDir = tempDir.appendingPathComponent("Payload/MockApp.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+
+        let infoPlist: [String: Any] = [
+            "CFBundleIdentifier": "com.mock.app",
+            "CFBundleDisplayName": "Mock App",
+            "CFBundleShortVersionString": "2.0.1",
+            "CFBundleVersion": "42",
+            "CFBundleExecutable": "MockApp"
+        ]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: infoPlist, format: .xml, options: 0)
+        try infoData.write(to: appDir.appendingPathComponent("Info.plist"))
+
+        let mockEntitlements: [String: Any] = [
+            "application-identifier": "MOCKTEAM99.com.mock.app",
+            "com.apple.security.application-groups": ["group.mock.shared"],
+            "get-task-allow": true
+        ]
+        let xcentData = try PropertyListSerialization.data(fromPropertyList: mockEntitlements, format: .xml, options: 0)
+        try xcentData.write(to: appDir.appendingPathComponent("MockApp.xcent"))
+
+        // Create zip archive (.ipa) using /usr/bin/zip
+        let ipaURL = FileManager.default.temporaryDirectory.appendingPathComponent("MockApp_\(UUID().uuidString).ipa")
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            try? FileManager.default.removeItem(at: ipaURL)
+        }
+
+        let zipTask = Process()
+        zipTask.currentDirectoryURL = tempDir
+        zipTask.launchPath = "/usr/bin/zip"
+        zipTask.arguments = ["-q", "-r", ipaURL.path, "Payload"]
+        try zipTask.run()
+        zipTask.waitUntilExit()
+        XCTAssertEqual(zipTask.terminationStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ipaURL.path))
+
+        // Inspect IPA and extract entitlements
+        let metadata = await IPAManager.shared.inspectIPA(at: ipaURL)
+        XCTAssertEqual(metadata.displayName, "Mock App")
+        XCTAssertEqual(metadata.bundleIdentifier, "com.mock.app")
+        XCTAssertEqual(metadata.version, "2.0.1")
+        XCTAssertEqual(metadata.buildNumber, "42")
+        XCTAssertEqual(metadata.executableName, "MockApp")
+
+        let extractedEnt = try await IPAManager.shared.extractEntitlements(from: ipaURL)
+        XCTAssertEqual(extractedEnt.applicationIdentifier, "MOCKTEAM99.com.mock.app")
+        XCTAssertEqual(extractedEnt.teamId, "MOCKTEAM99")
+        XCTAssertEqual(extractedEnt.appGroups, ["group.mock.shared"])
+        XCTAssertEqual(extractedEnt.getTaskAllow, true)
+    }
 }
+

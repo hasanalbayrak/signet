@@ -116,6 +116,26 @@ public final class SignerService: @unchecked Sendable {
             arguments.append("-f")
         }
 
+        var temporaryEntitlementsURL: URL? = nil
+        if let entURL = config.customEntitlementsURL, FileManager.default.fileExists(atPath: entURL.path) {
+            arguments.append(contentsOf: ["-e", entURL.path])
+            onLog?(LogMessage(level: .info, message: "Applied custom entitlements (-e): \(entURL.lastPathComponent)"))
+        } else if let content = config.customEntitlementsContent, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SignetEntitlements", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let tempEntURL = tempDir.appendingPathComponent("injected_entitlements_\(UUID().uuidString).plist")
+            if (try? content.write(to: tempEntURL, atomically: true, encoding: .utf8)) != nil {
+                temporaryEntitlementsURL = tempEntURL
+                arguments.append(contentsOf: ["-e", tempEntURL.path])
+                onLog?(LogMessage(level: .info, message: "Applied custom imported entitlements (-e)"))
+            }
+        }
+        defer {
+            if let temp = temporaryEntitlementsURL {
+                try? FileManager.default.removeItem(at: temp)
+            }
+        }
+
         arguments.append(contentsOf: ["-z", "\(config.compressionLevel)"])
         arguments.append(inputIPA.path)
 

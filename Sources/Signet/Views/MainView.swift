@@ -45,6 +45,9 @@ public struct MainView: View {
         .sheet(isPresented: $appState.showSettingsSheet) {
             SettingsView(appState: appState)
         }
+        .sheet(isPresented: $appState.showIPAManagerSheet) {
+            IPAManagerView(appState: appState)
+        }
         .sheet(isPresented: $appState.showPasswordPrompt) {
             CertificatePasswordPromptView(appState: appState)
         }
@@ -159,6 +162,37 @@ public struct MainView: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            // IPA Manager Button
+            Button {
+                appState.showIPAManagerSheet = true
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "shippingbox.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(appState.customEntitlements != nil ? Color.green : Color.accentColor)
+
+                    Text("IPA Manager")
+                        .font(.system(size: 11, weight: .medium))
+
+                    if let count = appState.customEntitlements?.count {
+                        Text("\(count)")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.2))
+                            .foregroundStyle(Color.green)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("IPA Manager: Inspect packages, export and import entitlements across IPAs")
 
             // Settings Button
             Button {

@@ -19,6 +19,13 @@ Signet eliminates the friction of traditional sideloading:
   - Automatic iOS device UDID registration in Apple Developer Portal.
   - Generates 365-day Development Certificates and Wildcard Provisioning Profiles (`*`).
 - **Native macOS Liquid Glass Design**: Built with pure SwiftUI for macOS 14+ (Sonoma, Sequoia).
+- **IPA Manager & Entitlements Hub**:
+  - Deep package inspection: Mach-O binaries, embedded frameworks, app extensions, and provisioning profiles.
+  - Multi-strategy Entitlements extraction: extracts capabilities directly from Mach-O CodeSignature, `embedded.mobileprovision`, or `.xcent`.
+  - 1-Click Entitlements Export: save `.entitlements` or `.plist` files, or copy formatted XML.
+  - Entitlements Import & Transfer: inject exported entitlements directly into another target IPA.
+  - Automatic Team ID & Bundle ID adaptation to prevent provisioning profile signature mismatch.
+  - Side-by-side Entitlements Diff comparison between two IPAs.
 - **Embedded zsign Signing Engine**: Fast C++ signing with Mach-O parsing, dynamic entitlements, and `.zsign_cache` support.
 - **Tweak & Dylib Injection**: Drag-and-drop external `.dylib` and `.framework` files into the IPA.
 - **Bundle ID & Name Customization**: Easily change the bundle identifier or app display name on the fly.
@@ -54,7 +61,8 @@ Signet/
 │       │   ├── SigningConfiguration.swift
 │       │   ├── SigningState.swift
 │       │   ├── LogMessage.swift
-│       │   └── IPAMetadata.swift
+│       │   ├── IPAMetadata.swift
+│       │   └── IPAEntitlements.swift
 │       ├── Services/
 │       │   ├── AppleAuthService.swift
 │       │   ├── AppleDeveloperService.swift
@@ -69,6 +77,8 @@ Signet/
 │       │   └── SignetAppState.swift
 │       ├── Views/
 │       │   ├── MainView.swift
+│       │   ├── IPAManager/
+│       │   │   └── IPAManagerView.swift
 │       │   ├── Components/
 │       │   │   ├── DevicePickerView.swift
 │       │   │   ├── CertificateStatusCard.swift

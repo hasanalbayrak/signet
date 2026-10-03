@@ -139,6 +139,19 @@ public struct IPADropZoneView: View {
             // Change / Remove actions
             HStack(spacing: 8) {
                 Button {
+                    appState.showIPAManagerSheet = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "shippingbox.fill")
+                        Text("Manage & Entitlements")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Open in IPA Manager to inspect package and export entitlements")
+
+                Button {
                     browseForIPA()
                 } label: {
                     Text("Replace")

@@ -34,6 +34,8 @@ public final class SignetAppState: ObservableObject {
 
     // UI State
     @Published public var showSettingsSheet: Bool = false
+    @Published public var showIPAManagerSheet: Bool = false
+    @Published public var customEntitlements: IPAEntitlements? = nil
     @Published public var showErrorAlert: Bool = false
     @Published public var alertErrorMessage: String = ""
     @Published public var showPasswordPrompt: Bool = false
@@ -638,6 +640,9 @@ public final class SignetAppState: ObservableObject {
         self.config.ipaURL = nil
         self.config.customBundleId = ""
         self.config.customDisplayName = ""
+        self.customEntitlements = nil
+        self.config.customEntitlementsURL = nil
+        self.config.customEntitlementsContent = nil
         self.lastSignedIPAURL = nil
         self.pipelineStep = .idle
     }
@@ -654,6 +659,57 @@ public final class SignetAppState: ObservableObject {
             appendLog(LogMessage(level: .verbose, message: "Removed tweak dylib: \(removed.lastPathComponent)"))
         }
         config.injectedDylibs.remove(atOffsets: offsets)
+    }
+
+    // MARK: - Entitlements Management
+
+    public func setCustomEntitlements(_ entitlements: IPAEntitlements) {
+        self.customEntitlements = entitlements
+        self.config.customEntitlementsContent = entitlements.rawXML
+        self.config.customEntitlementsURL = nil
+        appendLog(LogMessage(level: .success, message: "Custom entitlements loaded (\(entitlements.count) keys from \(entitlements.source.rawValue))."))
+    }
+
+    public func importCustomEntitlements(from url: URL) {
+        do {
+            let ent = try ipaManager.importEntitlements(from: url)
+            self.customEntitlements = ent
+            self.config.customEntitlementsURL = url
+            self.config.customEntitlementsContent = ent.rawXML
+            appendLog(LogMessage(level: .success, message: "Imported entitlements file: \(url.lastPathComponent) (\(ent.count) keys)"))
+        } catch {
+            showError("Failed to import entitlements: \(error.localizedDescription)")
+            appendLog(LogMessage(level: .error, message: "Import entitlements error: \(error.localizedDescription)"))
+        }
+    }
+
+    public func clearCustomEntitlements() {
+        self.customEntitlements = nil
+        self.config.customEntitlementsURL = nil
+        self.config.customEntitlementsContent = nil
+        appendLog(LogMessage(level: .info, message: "Cleared custom entitlements. Signing will use profile defaults."))
+    }
+
+    public func exportCurrentEntitlements(to destinationURL: URL) {
+        let ent = customEntitlements ?? ipaMetadata?.entitlements
+        guard let toExport = ent else {
+            showError("No entitlements available to export.")
+            return
+        }
+
+        do {
+            try ipaManager.exportEntitlements(toExport, to: destinationURL)
+            appendLog(LogMessage(level: .success, message: "Entitlements exported to: \(destinationURL.path)"))
+        } catch {
+            showError("Failed to export entitlements: \(error.localizedDescription)")
+        }
+    }
+
+    public func applyTargetIPAWithEntitlements(targetIPA: URL, entitlements: IPAEntitlements) {
+        setIPA(url: targetIPA)
+        setCustomEntitlements(entitlements)
+        showIPAManagerSheet = false
+        appendLog(LogMessage(level: .success, message: "Target IPA loaded with imported entitlements: \(targetIPA.lastPathComponent)"))
     }
 
     // MARK: - Signing Pipeline
